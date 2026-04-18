@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional
 
 
 class EvidenceItem(BaseModel):
-    evidence_type: str  # stdout / diff / review / metric
+    evidence_type: str
     content: str
-    verdict: str = ""   # pass / fail / warning
+    verdict: str = ""
 
 
 class TicketCreate(BaseModel):
@@ -38,9 +37,38 @@ class TicketAdvance(BaseModel):
     reason: str = ""
 
 
+class TicketReject(BaseModel):
+    """Master/CR rejects back to rework."""
+    reason: str
+    blocker_comments: list[str] = Field(default_factory=list)
+
+
 class AgentRegister(BaseModel):
     id: str
-    role: str  # coder / cr / qa / deploy
+    role: str
     display_name: str = ""
     provider: str = "unknown"
     capabilities: list[str] = Field(default_factory=list)
+
+
+class CommentCreate(BaseModel):
+    author_id: str
+    author_role: str = ""
+    content: str
+    comment_type: str = "discussion"  # discussion / blocker / decision / question
+    refs: list[str] = Field(default_factory=list)
+    parent_id: int | None = None
+
+
+class CommentUpdate(BaseModel):
+    status: str  # open / resolved / wontfix
+
+
+class KnowledgeCreate(BaseModel):
+    id: str
+    category: str  # failure_pattern / architecture_decision / convention
+    title: str
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    source_tickets: list[str] = Field(default_factory=list)
+    created_by: str = "master"

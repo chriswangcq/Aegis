@@ -6,6 +6,48 @@ from pathlib import Path
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "command-center.db"
 
+VALID_PHASES = [
+    "planning", "ready",
+    "preflight", "preflight_review", "preflight_rework",
+    "implementation", "self_test",
+    "code_review", "rework",
+    "qa", "merge_ready", "merging",
+    "deploy_prep", "canary", "rollback",
+    "done",
+]
+
+# Which phases are claimable and by which role
+CLAIMABLE = {
+    "ready":            "coder",
+    "preflight_rework": "coder",
+    "rework":           "coder",
+    "preflight_review": "cr",
+    "code_review":      "cr",
+    "qa":               "qa",
+    "deploy_prep":      "deploy",
+}
+
+# Where submit advances to
+SUBMIT_NEXT = {
+    "preflight":       "preflight_review",
+    "implementation":  "self_test",
+    "self_test":       "code_review",
+    "preflight_rework":"preflight_review",
+    "rework":          "self_test",
+    "code_review":     "qa",
+    "qa":              "merge_ready",
+}
+
+PHASE_TIMEOUTS = {
+    "preflight": 4*3600*1000, "preflight_review": 2*3600*1000,
+    "preflight_rework": 2*3600*1000, "implementation": 8*3600*1000,
+    "self_test": 1*3600*1000, "code_review": 4*3600*1000,
+    "rework": 4*3600*1000, "qa": 2*3600*1000,
+    "merge_ready": 1*3600*1000, "merging": 15*60*1000,
+    "deploy_prep": 2*3600*1000, "canary": 48*3600*1000,
+    "rollback": 1*3600*1000,
+}
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -39,6 +81,7 @@ def init_schema(conn: sqlite3.Connection):
         branch         TEXT,
         priority       INTEGER DEFAULT 0,
         risk_level     TEXT DEFAULT 'normal',
+        review_rounds  INTEGER DEFAULT 0,
         created_by     TEXT,
         created_at     INTEGER,
         updated_at     INTEGER
@@ -71,21 +114,69 @@ def init_schema(conn: sqlite3.Connection):
         timestamp     INTEGER
     );
 
-    CREATE TABLE IF NOT EXISTS failure_patterns (
-        id              TEXT PRIMARY KEY,
-        pattern_name    TEXT NOT NULL,
-        description     TEXT,
-        severity        TEXT DEFAULT 'high',
-        first_seen_in   TEXT,
-        recurrences     TEXT DEFAULT '[]',
-        detection_query TEXT,
-        countermeasure  TEXT,
-        created_at      INTEGER,
-        updated_at      INTEGER
+    CREATE TABLE IF NOT EXISTS comments (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id     TEXT NOT NULL REFERENCES tickets(id),
+        author_id     TEXT NOT NULL,
+        author_role   TEXT,
+        content       TEXT NOT NULL,
+        comment_type  TEXT DEFAULT 'discussion',
+        status        TEXT DEFAULT 'open',
+        refs          TEXT DEFAULT '[]',
+        parent_id     INTEGER,
+        created_at    INTEGER,
+        updated_at    INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge (
+        id            TEXT PRIMARY KEY,
+        category      TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        content       TEXT NOT NULL,
+        tags          TEXT DEFAULT '[]',
+        source_tickets TEXT DEFAULT '[]',
+        created_by    TEXT,
+        created_at    INTEGER,
+        updated_at    INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS event_log (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type    TEXT NOT NULL,
+        ticket_id     TEXT,
+        agent_id      TEXT,
+        old_value     TEXT,
+        new_value     TEXT,
+        metadata      TEXT DEFAULT '{}',
+        timestamp     INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS trust_events (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id      TEXT NOT NULL REFERENCES agents(id),
+        ticket_id     TEXT,
+        dimension     TEXT NOT NULL,
+        delta         REAL NOT NULL,
+        reason        TEXT,
+        created_at    INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_tickets_phase ON tickets(phase);
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
     CREATE INDEX IF NOT EXISTS idx_evidence_ticket ON evidence(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_comments_ticket ON comments(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
+    CREATE INDEX IF NOT EXISTS idx_event_log_ticket ON event_log(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_trust_events_agent ON trust_events(agent_id);
     """)
     conn.commit()
+
+
+def log_event(conn: sqlite3.Connection, event_type: str, ticket_id: str = None,
+              agent_id: str = None, old_value: str = None, new_value: str = None,
+              metadata: str = "{}"):
+    conn.execute(
+        "INSERT INTO event_log (event_type, ticket_id, agent_id, old_value, new_value, metadata, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (event_type, ticket_id, agent_id, old_value, new_value, metadata, now_ms())
+    )
