@@ -19,6 +19,7 @@ VALID_PHASES = [
 # Which phases are claimable and by which role
 CLAIMABLE = {
     "ready":            "coder",
+    "implementation":   "coder",   # after preflight approved, coder claims to code
     "preflight_rework": "coder",
     "rework":           "coder",
     "preflight_review": "cr",

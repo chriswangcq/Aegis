@@ -39,7 +39,18 @@ async def lifespan(app: FastAPI):
     _conn.close()
 
 
-app = FastAPI(title="NovAIC Command Center", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="NovAIC Command Center", version="0.3.0", lifespan=lifespan)
+
+
+def _parse_json_fields(d: dict) -> dict:
+    """Parse JSON string fields into real objects for API consumers."""
+    for key in ("depends_on", "scope_json", "checklist_json", "trust_json", "capabilities", "refs"):
+        if key in d and isinstance(d[key], str):
+            try:
+                d[key] = json.loads(d[key])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return d
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -60,7 +71,7 @@ def list_tickets(phase: str | None = None, available: bool = False):
         ).fetchall()
     else:
         rows = db().execute("SELECT * FROM tickets ORDER BY priority DESC, created_at ASC").fetchall()
-    return {"tickets": [row_to_dict(r) for r in rows], "count": len(rows)}
+    return {"tickets": [_parse_json_fields(row_to_dict(r)) for r in rows], "count": len(rows)}
 
 
 @app.get("/tickets/{tid}")
@@ -68,19 +79,254 @@ def get_ticket(tid: str):
     t = db().execute("SELECT * FROM tickets WHERE id = ?", (tid,)).fetchone()
     if not t:
         raise HTTPException(404)
-    result = row_to_dict(t)
+    result = _parse_json_fields(row_to_dict(t))
     result["evidence"] = [row_to_dict(e) for e in
         db().execute("SELECT * FROM evidence WHERE ticket_id=? ORDER BY timestamp", (tid,)).fetchall()]
-    result["comments"] = [row_to_dict(c) for c in
+    result["comments"] = [_parse_json_fields(row_to_dict(c)) for c in
         db().execute("SELECT * FROM comments WHERE ticket_id=? ORDER BY created_at", (tid,)).fetchall()]
     result["open_blockers"] = db().execute(
         "SELECT COUNT(*) as c FROM comments WHERE ticket_id=? AND comment_type='blocker' AND status='open'",
         (tid,)).fetchone()["c"]
-    # Inject relevant knowledge
     result["knowledge"] = [row_to_dict(k) for k in
         db().execute("SELECT id,category,title FROM knowledge WHERE category='failure_pattern' "
                      "ORDER BY created_at DESC LIMIT 10").fetchall()]
     return result
+
+
+@app.get("/tickets/{tid}/context")
+def get_ticket_context(tid: str, agent_id: str | None = None):
+    """Assemble a ready-to-inject prompt context for an Agent.
+
+    Returns markdown text that can be pasted directly into an Agent's system prompt.
+    Includes ticket details, scope, checklist, open blockers, and personalized warnings.
+    """
+    t = db().execute("SELECT * FROM tickets WHERE id = ?", (tid,)).fetchone()
+    if not t: raise HTTPException(404)
+    t = _parse_json_fields(row_to_dict(t))
+
+    lines = [
+        f"# Ticket {t['id']}: {t['title']}",
+        f"Phase: {t['phase']}  |  Priority: P{t['priority']}  |  Risk: {t['risk_level']}",
+        f"Assigned: {t['assigned_to'] or '—'}  |  Review rounds: {t.get('review_rounds', 0)}",
+        "",
+    ]
+
+    # Description
+    if t.get("description"):
+        lines += ["## Description", t["description"], ""]
+
+    # Scope
+    scope = t.get("scope_json", {})
+    if isinstance(scope, str):
+        scope = json.loads(scope)
+    if scope.get("includes"):
+        lines += ["## Scope (allowed files)", *[f"  - {f}" for f in scope["includes"]], ""]
+    if scope.get("excludes"):
+        lines += ["## Scope (DO NOT touch)", *[f"  - ❌ {f}" for f in scope["excludes"]], ""]
+
+    # Checklist
+    checklist = t.get("checklist_json", [])
+    if isinstance(checklist, str):
+        checklist = json.loads(checklist)
+    if checklist:
+        lines.append("## Checklist")
+        for item in checklist:
+            mark = {"done": "x", "deferred": "-"}.get(item.get("status", ""), " ")
+            lines.append(f"  [{mark}] {item.get('description', '')}")
+        lines.append("")
+
+    # Dependencies
+    deps = t.get("depends_on", [])
+    if isinstance(deps, str):
+        deps = json.loads(deps)
+    if deps:
+        lines += [f"## Dependencies: {', '.join(deps)}", ""]
+
+    # Open blockers
+    blockers = db().execute(
+        "SELECT content, author_id FROM comments WHERE ticket_id=? AND comment_type='blocker' AND status='open'",
+        (tid,)).fetchall()
+    if blockers:
+        lines.append("## ⛔ Open Blockers (must resolve before submit)")
+        for b in blockers:
+            lines.append(f"  - [{b['author_id']}] {b['content']}")
+        lines.append("")
+
+    # Recent discussion
+    comments = db().execute(
+        "SELECT author_id, comment_type, content FROM comments WHERE ticket_id=? ORDER BY created_at DESC LIMIT 5",
+        (tid,)).fetchall()
+    if comments:
+        lines.append("## Recent Discussion")
+        for c in comments:
+            lines.append(f"  [{c['comment_type']}] {c['author_id']}: {c['content'][:120]}")
+        lines.append("")
+
+    # Agent-specific warnings
+    if agent_id:
+        agent = db().execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+        if agent:
+            trust = json.loads(agent["trust_json"]) if agent["trust_json"] else {}
+            low = [(k, v) for k, v in trust.items() if v < 0.7]
+            if low or agent["failure_count"] > 0:
+                lines.append("## ⚠️ Your Warnings")
+                if agent["failure_count"] > 0:
+                    lines.append(f"  You have {agent['failure_count']} historical failures.")
+                for dim, score in low:
+                    lines.append(f"  - {dim}: {score:.1f}/1.0 (below threshold)")
+                lines.append("")
+
+    # Failure patterns
+    patterns = db().execute(
+        "SELECT id, title FROM knowledge WHERE category='failure_pattern' ORDER BY created_at DESC LIMIT 5"
+    ).fetchall()
+    if patterns:
+        lines.append("## Known Failure Patterns")
+        for p in patterns:
+            lines.append(f"  - {p['id']}: {p['title']}")
+        lines.append("")
+
+    # Declare-done self-check
+    lines += [
+        "## Pre-Submit Self-Check",
+        "  1. 我勾的每一项都有可执行凭证吗？",
+        "  2. 这个 commit 能独立 revert 吗？",
+        "  3. 去掉生产代码这个测试会红吗？",
+    ]
+
+    return {"ticket_id": tid, "context": "\n".join(lines)}
+
+
+@app.get("/inbox/{agent_id}")
+def agent_inbox(agent_id: str):
+    """Agent's personalized inbox — what needs my attention right now?
+
+    Returns:
+    - assigned: tickets currently assigned to me
+    - available: tickets I can claim (matching my role)
+    - rejected: my tickets that were rejected (need rework)
+    - mentions: comments that mention me or are on my tickets
+    """
+    agent = db().execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    if not agent: raise HTTPException(404, f"Agent {agent_id} not registered")
+    role = agent["role"]
+
+    assigned = [_parse_json_fields(row_to_dict(r)) for r in db().execute(
+        "SELECT * FROM tickets WHERE assigned_to=?", (agent_id,)).fetchall()]
+
+    # Available: tickets in claimable phases matching this agent's role
+    claimable_for_role = [phase for phase, r in CLAIMABLE.items() if r == role]
+    if claimable_for_role:
+        placeholders = ",".join("?" * len(claimable_for_role))
+        available = [_parse_json_fields(row_to_dict(r)) for r in db().execute(
+            f"SELECT * FROM tickets WHERE phase IN ({placeholders}) AND blocked_by IS NULL AND assigned_to IS NULL "
+            "ORDER BY priority DESC", claimable_for_role).fetchall()]
+    else:
+        available = []
+
+    # Recent comments on tickets I've worked on
+    recent_comments = [_parse_json_fields(row_to_dict(c)) for c in db().execute(
+        """SELECT c.* FROM comments c JOIN event_log e ON c.ticket_id = e.ticket_id
+           WHERE e.agent_id=? AND c.author_id != ? ORDER BY c.created_at DESC LIMIT 10""",
+        (agent_id, agent_id)).fetchall()]
+
+    return {
+        "agent_id": agent_id,
+        "role": role,
+        "assigned": assigned,
+        "available": available,
+        "recent_comments": recent_comments,
+    }
+
+
+@app.get("/attention")
+def master_attention():
+    """Master's attention queue — everything that needs a decision right now.
+
+    Aggregates:
+    - Tickets waiting for review (preflight_review, code_review, merge_ready)
+    - Expired locks (agent crashed/timed out)
+    - Tickets with unresolved blockers stuck in rework
+    - High review-round tickets (possible thrashing)
+    """
+    now = now_ms()
+
+    needs_review = [_parse_json_fields(row_to_dict(r)) for r in db().execute(
+        "SELECT * FROM tickets WHERE phase IN ('preflight_review','code_review','merge_ready') "
+        "AND assigned_to IS NULL ORDER BY priority DESC"
+    ).fetchall()]
+
+    expired = [row_to_dict(r) for r in db().execute(
+        "SELECT id, assigned_to, phase, locked_at FROM tickets "
+        "WHERE locked_at IS NOT NULL AND locked_at + lock_ttl_ms < ?", (now,)
+    ).fetchall()]
+
+    stuck_rework = [_parse_json_fields(row_to_dict(r)) for r in db().execute(
+        "SELECT * FROM tickets WHERE phase IN ('rework','preflight_rework') AND review_rounds >= 3"
+    ).fetchall()]
+
+    canary_active = [_parse_json_fields(row_to_dict(r)) for r in db().execute(
+        "SELECT * FROM tickets WHERE phase = 'canary'"
+    ).fetchall()]
+
+    recent_rejects = [row_to_dict(r) for r in db().execute(
+        "SELECT * FROM event_log WHERE event_type='rejected' ORDER BY timestamp DESC LIMIT 5"
+    ).fetchall()]
+
+    return {
+        "needs_review": needs_review,
+        "expired_locks": expired,
+        "stuck_in_rework": stuck_rework,
+        "canary_active": canary_active,
+        "recent_rejects": recent_rejects,
+        "summary": {
+            "review_queue": len(needs_review),
+            "expired": len(expired),
+            "stuck": len(stuck_rework),
+            "canary": len(canary_active),
+        }
+    }
+
+
+@app.patch("/tickets/{tid}")
+def update_ticket(tid: str, request_body: dict):
+    """Master updates ticket fields (description, scope, checklist, priority, risk_level)."""
+    now = now_ms()
+    t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
+    if not t: raise HTTPException(404)
+
+    allowed = {"title", "description", "priority", "risk_level", "branch"}
+    json_fields = {"scope_includes": "scope_json", "scope_excludes": "scope_json",
+                    "checklist": "checklist_json"}
+
+    updates = []
+    values = []
+    for key, val in request_body.items():
+        if key in allowed:
+            updates.append(f"{key}=?")
+            values.append(val)
+        elif key == "scope_includes" or key == "scope_excludes":
+            scope = json.loads(t["scope_json"]) if t["scope_json"] else {}
+            scope_key = "includes" if key == "scope_includes" else "excludes"
+            scope[scope_key] = val
+            updates.append("scope_json=?")
+            values.append(json.dumps(scope))
+        elif key == "checklist":
+            checklist = [{"description": c, "status": "pending"} for c in val]
+            updates.append("checklist_json=?")
+            values.append(json.dumps(checklist))
+
+    if not updates:
+        raise HTTPException(400, "No valid fields to update")
+
+    updates.append("updated_at=?")
+    values.append(now)
+    values.append(tid)
+
+    db().execute(f"UPDATE tickets SET {', '.join(updates)} WHERE id=?", values)
+    log_event(db(), "ticket_updated", tid, metadata=json.dumps(list(request_body.keys())))
+    db().commit()
+    return {"ticket_id": tid, "updated_fields": list(request_body.keys())}
 
 
 @app.post("/tickets")
@@ -131,7 +377,8 @@ def claim_ticket(tid: str, body: TicketClaim):
     # After claim, phase stays the same for review/qa (they work in that phase)
     # For ready → preflight (coder starts preflight)
     next_phase_map = {
-        "ready": "preflight", "preflight_rework": "preflight_rework",
+        "ready": "preflight", "implementation": "implementation",
+        "preflight_rework": "preflight_rework",
         "rework": "rework", "preflight_review": "preflight_review",
         "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep",
     }
