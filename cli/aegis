@@ -1,0 +1,3 @@
+#!/bin/bash
+# Aegis CLI launcher — install via: ln -s $(pwd)/cli/aegis /usr/local/bin/aegis
+exec python3 "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/aegis.py" "$@"
