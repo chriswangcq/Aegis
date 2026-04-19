@@ -22,6 +22,7 @@ class TicketCreate(BaseModel):
     checklist: list[str] = Field(default_factory=list)
     test_specs: list[dict] = Field(default_factory=list)  # Master-defined test scenarios
     skip_preflight: bool = False  # simple tickets can go straight to implementation
+    domain: str = ""               # Gap 5: python/typescript/infra/frontend
     created_by: str = "master"
 
 

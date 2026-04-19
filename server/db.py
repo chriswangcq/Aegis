@@ -23,9 +23,11 @@ PHASE_ROLE = {
     "preflight_rework": "coder",
     "rework":           "coder",
     "preflight_review": "reviewer",
+    "design_review":    "reviewer",     # Gap 3: RFC review for high-risk tickets
     "code_review":      "reviewer",
     "qa":               "qa",
     "deploy_prep":      "deployer",
+    "monitoring":       "deployer",     # Gap 1: post-deploy health check
 }
 
 # Where submit advances to
@@ -34,18 +36,22 @@ SUBMIT_NEXT = {
     "implementation":  "code_review",   # test evidence required at submit
     "preflight_rework":"preflight_review",
     "rework":          "code_review",    # rework goes straight to CR too
+    "design_review":   "implementation", # after RFC approved → start coding
     "code_review":     "qa",
     "qa":              "merge_ready",
+    "deploy_prep":     "monitoring",     # Gap 1: deploy → monitoring
+    "monitoring":      "done",           # Gap 1: monitoring pass → done
 }
 
 PHASE_TIMEOUTS = {
     "preflight": 4*3600*1000, "preflight_review": 2*3600*1000,
+    "design_review": 4*3600*1000,
     "preflight_rework": 2*3600*1000, "implementation": 8*3600*1000,
     "self_test": 1*3600*1000, "code_review": 4*3600*1000,
     "rework": 4*3600*1000, "qa": 2*3600*1000,
     "merge_ready": 1*3600*1000, "merging": 15*60*1000,
-    "deploy_prep": 2*3600*1000, "canary": 48*3600*1000,
-    "rollback": 1*3600*1000,
+    "deploy_prep": 2*3600*1000, "monitoring": 30*60*1000,  # 30 min health check
+    "canary": 48*3600*1000, "rollback": 1*3600*1000,
 }
 
 
@@ -83,6 +89,7 @@ def init_schema(conn: sqlite3.Connection):
         branch         TEXT,
         priority       INTEGER DEFAULT 0,
         risk_level     TEXT DEFAULT 'normal',
+        domain         TEXT DEFAULT '',              -- Gap 5: python/typescript/infra/frontend
         review_rounds  INTEGER DEFAULT 0,
         created_by     TEXT,
         created_at     INTEGER,
@@ -124,6 +131,7 @@ def init_schema(conn: sqlite3.Connection):
         score          REAL,
         exam_answers   TEXT DEFAULT '[]',
         trust_json     TEXT DEFAULT '{}',   -- trust is PER ROLE
+        domain_trust_json TEXT DEFAULT '{}', -- Gap 5: trust per domain {"python":0.8,"ts":0.4}
         tasks_completed INTEGER DEFAULT 0,
         tasks_failed   INTEGER DEFAULT 0,
         interviewed_by TEXT,               -- who graded the exam
@@ -132,6 +140,17 @@ def init_schema(conn: sqlite3.Connection):
         created_at     INTEGER,
         updated_at     INTEGER,
         UNIQUE(agent_id, role_id)
+    );
+
+    -- ── Post-Mortems (Gap 2: learn from failures) ──────────
+    CREATE TABLE IF NOT EXISTS post_mortems (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id     TEXT NOT NULL REFERENCES tickets(id),
+        trigger_reason TEXT,          -- e.g. 'review_rounds >= 2'
+        pattern       TEXT,           -- detected error pattern
+        action_items  TEXT DEFAULT '[]',  -- JSON: new tickets / exam updates
+        knowledge_id  TEXT,           -- link to knowledge entry created
+        created_at    INTEGER
     );
 
     -- ── Evidence ────────────────────────────────────────────

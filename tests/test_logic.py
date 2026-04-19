@@ -341,7 +341,133 @@ def test_gate_all_pass_complete_evidence():
     assert "e2e_coverage" in gates
 
 
+# ── Gap 1: Monitoring ────────────────────────────────────────
+
+from server.logic import validate_monitoring_evidence
+
+def test_monitoring_requires_health_check():
+    r = validate_monitoring_evidence([{"evidence_type": "error_rate"}])
+    assert not r.ok
+    assert "health_check" in r.error
+
+def test_monitoring_requires_error_rate():
+    r = validate_monitoring_evidence([{"evidence_type": "health_check"}])
+    assert not r.ok
+    assert "error_rate" in r.error
+
+def test_monitoring_passes_with_both():
+    r = validate_monitoring_evidence([
+        {"evidence_type": "health_check"},
+        {"evidence_type": "error_rate"}])
+    assert r.ok
+
+
+# ── Gap 2: Post-Mortem ───────────────────────────────────────
+
+from server.logic import analyze_post_mortem
+
+def test_no_post_mortem_under_2_rounds():
+    pm = analyze_post_mortem(1, ["bad code"])
+    assert not pm.should_trigger
+
+def test_post_mortem_triggers_at_2_rounds():
+    pm = analyze_post_mortem(2, ["bad code"])
+    assert pm.should_trigger
+    assert "unclassified" in pm.patterns
+
+def test_post_mortem_detects_fake_test():
+    pm = analyze_post_mortem(3, ["这是假测试，mock 了所有东西"])
+    assert "fake_test" in pm.patterns
+    assert any(a["type"] == "exam_update" for a in pm.action_items)
+
+def test_post_mortem_detects_design_issue():
+    pm = analyze_post_mortem(2, ["架构设计有问题，应该先做 design review"])
+    assert "design_issue" in pm.patterns
+
+def test_post_mortem_detects_scope_creep():
+    pm = analyze_post_mortem(2, ["scope 超出了 ticket 范围"])
+    assert "scope_creep" in pm.patterns
+
+def test_post_mortem_detects_testability():
+    pm = analyze_post_mortem(2, ["_logic.py 里有 I/O 调用"])
+    assert "testability_violation" in pm.patterns
+
+
+# ── Gap 3: Design Review ─────────────────────────────────────
+
+from server.logic import should_require_design_review
+
+def test_design_review_for_high_risk():
+    assert should_require_design_review("high", 2) is True
+
+def test_design_review_for_critical_risk():
+    assert should_require_design_review("critical", 1) is True
+
+def test_design_review_for_high_priority():
+    assert should_require_design_review("normal", 4) is True
+
+def test_design_review_for_multi_module():
+    assert should_require_design_review("normal", 2, ["mod_a", "mod_b", "mod_c"]) is True
+
+def test_no_design_review_for_simple_ticket():
+    assert should_require_design_review("normal", 2) is False
+
+
+# ── Gap 4: DORA Metrics ──────────────────────────────────────
+
+from server.logic import calculate_dora
+
+def test_dora_empty_events():
+    m = calculate_dora([], 1000000, 30)
+    assert m.deployment_frequency == 0
+    assert m.change_failure_rate == 0
+
+def test_dora_with_events():
+    now = 100_000_000
+    events = [
+        {"event_type": "ticket_created", "ticket_id": "T1", "timestamp": now - 1000},
+        {"event_type": "submitted", "ticket_id": "T1", "timestamp": now - 500},
+        {"event_type": "advanced", "ticket_id": "T1", "timestamp": now - 100, "new_value": "done"},
+    ]
+    m = calculate_dora(events, now, 30)
+    assert m.deployment_frequency > 0
+    assert m.lead_time_ms == 900  # 1000 - 100
+    assert m.change_failure_rate == 0  # no rejections
+
+def test_dora_with_rejections():
+    now = 100_000_000
+    events = [
+        {"event_type": "submitted", "ticket_id": "T1", "timestamp": now - 1000},
+        {"event_type": "rejected", "ticket_id": "T1", "timestamp": now - 800},
+        {"event_type": "submitted", "ticket_id": "T1", "timestamp": now - 500},
+    ]
+    m = calculate_dora(events, now, 30)
+    assert m.change_failure_rate > 0
+    assert m.mttr_ms == 300  # 800 - 500
+
+
+# ── Gap 5: Domain Matching ───────────────────────────────────
+
+from server.logic import check_domain_match
+
+def test_domain_match_no_domain():
+    r = check_domain_match({"python": 0.8}, "")
+    assert r.ok  # empty domain = anyone
+
+def test_domain_match_high_trust():
+    r = check_domain_match({"python": 0.8}, "python")
+    assert r.ok
+
+def test_domain_match_low_trust():
+    r = check_domain_match({"python": 0.1}, "python", min_domain_trust=0.3)
+    assert not r.ok
+    assert "0.10" in r.error
+
+def test_domain_match_unknown_domain_default():
+    r = check_domain_match({}, "typescript")
+    assert r.ok  # default trust 0.5 > 0.3 threshold
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
-

@@ -70,9 +70,11 @@ def determine_next_phase(current_phase: str, ticket: dict) -> str:
         "preflight_rework": "preflight_rework",
         "rework": "rework",
         "preflight_review": "preflight_review",
+        "design_review": "design_review",      # Gap 3: RFC review
         "code_review": "code_review",
         "qa": "qa",
         "deploy_prep": "deploy_prep",
+        "monitoring": "monitoring",             # Gap 1: post-deploy health
     }
     return phase_map.get(current_phase, current_phase)
 
@@ -305,4 +307,214 @@ def run_gates(phase: str, evidence: list[dict],
                 verdicts.append(GateVerdict("e2e_coverage", True, "e2e evidence present"))
 
     return verdicts
+
+
+# ── Gap 1: Monitoring (post-deploy health check) ─────────────
+
+def validate_monitoring_evidence(evidence: list[dict]) -> Result:
+    """Deployer must prove system is healthy after deploy.
+
+    Required evidence:
+    - health_check: service responds 200
+    - error_rate: error rate comparison (before vs after)
+    - rollback_plan: what to do if things go wrong
+    """
+    types = {e.get("evidence_type", "") for e in evidence}
+
+    if "health_check" not in types:
+        return Result(ok=False, error="Monitoring requires 'health_check' evidence (service health status)")
+    if "error_rate" not in types:
+        return Result(ok=False, error="Monitoring requires 'error_rate' evidence (before/after comparison)")
+    return Result(ok=True)
+
+
+# ── Gap 2: Post-Mortem (learn from failures) ─────────────────
+
+@dataclass
+class PostMortemResult:
+    should_trigger: bool
+    reason: str
+    patterns: list[str]       # detected error patterns
+    action_items: list[dict]  # suggested actions
+
+
+def analyze_post_mortem(review_rounds: int, blocker_comments: list[str],
+                        rejection_history: list[dict] | None = None) -> PostMortemResult:
+    """Analyze whether a post-mortem should be triggered and what patterns exist.
+
+    Triggers when:
+    - review_rounds >= 2 (rejected twice)
+    - Same error pattern appears in blocker_comments
+    """
+    if review_rounds < 2:
+        return PostMortemResult(False, "Not enough rejections", [], [])
+
+    patterns = []
+    action_items = []
+    all_comments = " ".join(blocker_comments).lower()
+
+    # Detect common patterns
+    if "假测试" in all_comments or "fake test" in all_comments or "mock" in all_comments:
+        patterns.append("fake_test")
+        action_items.append({
+            "type": "exam_update",
+            "action": "Add fake-test detection question to coder exam",
+            "priority": "high"
+        })
+
+    if "scope" in all_comments or "范围" in all_comments:
+        patterns.append("scope_creep")
+        action_items.append({
+            "type": "process",
+            "action": "Require explicit scope approval before implementation",
+            "priority": "medium"
+        })
+
+    if "架构" in all_comments or "architecture" in all_comments or "design" in all_comments:
+        patterns.append("design_issue")
+        action_items.append({
+            "type": "process",
+            "action": "Mandate design_review for this ticket domain",
+            "priority": "high"
+        })
+
+    if "_logic" in all_comments or "纯函数" in all_comments or "i/o" in all_comments:
+        patterns.append("testability_violation")
+        action_items.append({
+            "type": "lint_rule",
+            "action": "Add stricter lint rules for this module",
+            "priority": "medium"
+        })
+
+    if not patterns:
+        patterns.append("unclassified")
+        action_items.append({
+            "type": "manual_review",
+            "action": f"Manual post-mortem needed — {review_rounds} rejections with no clear pattern",
+            "priority": "high"
+        })
+
+    return PostMortemResult(
+        should_trigger=True,
+        reason=f"Ticket rejected {review_rounds} times",
+        patterns=patterns,
+        action_items=action_items
+    )
+
+
+# ── Gap 3: Design Review (RFC routing) ───────────────────────
+
+def should_require_design_review(risk_level: str, priority: int,
+                                  scope_includes: list[str] | None = None) -> bool:
+    """Determine if a ticket needs design_review before implementation.
+
+    Rules:
+    - risk_level == 'high' or 'critical' → always
+    - priority >= 4 → always
+    - scope touches 3+ modules → yes
+    """
+    if risk_level in ("high", "critical"):
+        return True
+    if priority >= 4:
+        return True
+    if scope_includes and len(scope_includes) >= 3:
+        return True
+    return False
+
+
+# ── Gap 4: DORA Metrics ──────────────────────────────────────
+
+@dataclass
+class DORAMetrics:
+    deployment_frequency: float   # deploys per day
+    lead_time_ms: float           # avg ticket creation → done
+    change_failure_rate: float    # rejected_tickets / total_tickets
+    mttr_ms: float                # avg reject → rework → pass
+
+
+def calculate_dora(events: list[dict], now_ms: int,
+                   window_days: int = 30) -> DORAMetrics:
+    """Calculate DORA metrics from event log. Pure function.
+
+    Args:
+        events: list of {event_type, ticket_id, timestamp, old_value, new_value}
+        now_ms: current timestamp
+        window_days: lookback window
+    """
+    window_start = now_ms - (window_days * 86400 * 1000)
+    recent = [e for e in events if e.get("timestamp", 0) >= window_start]
+
+    # Deployment frequency: count events where new_value='done'
+    deploys = [e for e in recent if e.get("event_type") == "advanced"
+               and e.get("new_value") == "done"]
+    days = max(1, window_days)
+    deploy_freq = len(deploys) / days
+
+    # Lead time: ticket_created → done (per ticket)
+    created = {}
+    done = {}
+    for e in recent:
+        tid = e.get("ticket_id", "")
+        if e.get("event_type") == "ticket_created":
+            created[tid] = e.get("timestamp", 0)
+        if e.get("event_type") == "advanced" and e.get("new_value") == "done":
+            done[tid] = e.get("timestamp", 0)
+
+    lead_times = []
+    for tid in done:
+        if tid in created:
+            lead_times.append(done[tid] - created[tid])
+    avg_lead = sum(lead_times) / len(lead_times) if lead_times else 0
+
+    # Change failure rate: rejected / submitted
+    submitted = len([e for e in recent if e.get("event_type") == "submitted"])
+    rejected = len([e for e in recent if e.get("event_type") == "rejected"])
+    cfr = rejected / max(1, submitted)
+
+    # MTTR: reject → next successful submit (per ticket)
+    reject_times = {}
+    recover_times = {}
+    for e in recent:
+        tid = e.get("ticket_id", "")
+        if e.get("event_type") == "rejected" and tid not in reject_times:
+            reject_times[tid] = e.get("timestamp", 0)
+        if (e.get("event_type") == "submitted" and tid in reject_times
+                and tid not in recover_times):
+            recover_times[tid] = e.get("timestamp", 0)
+
+    mttrs = []
+    for tid in recover_times:
+        if tid in reject_times:
+            mttrs.append(recover_times[tid] - reject_times[tid])
+    avg_mttr = sum(mttrs) / len(mttrs) if mttrs else 0
+
+    return DORAMetrics(
+        deployment_frequency=round(deploy_freq, 3),
+        lead_time_ms=avg_lead,
+        change_failure_rate=round(cfr, 3),
+        mttr_ms=avg_mttr
+    )
+
+
+# ── Gap 5: Domain Skill Matching ─────────────────────────────
+
+def check_domain_match(agent_domain_trust: dict, ticket_domain: str,
+                        min_domain_trust: float = 0.3) -> Result:
+    """Check if agent has sufficient domain expertise for this ticket.
+
+    Args:
+        agent_domain_trust: {"python": 0.8, "typescript": 0.4, ...}
+        ticket_domain: domain tag of the ticket
+        min_domain_trust: minimum trust to claim (default 0.3 = very lenient)
+    """
+    if not ticket_domain:
+        return Result(ok=True)  # no domain specified, anyone can take it
+
+    trust = agent_domain_trust.get(ticket_domain, 0.5)  # default 0.5 for unknown
+    if trust < min_domain_trust:
+        return Result(ok=False,
+            error=f"Domain trust for '{ticket_domain}' is {trust:.2f} "
+                  f"(minimum {min_domain_trust}). Build expertise first.")
+    return Result(ok=True, data={"domain_trust": trust})
+
 

@@ -209,11 +209,17 @@ def create_ticket(body: TicketCreate):
     # Store skip_preflight in scope_json
     if body.skip_preflight:
         scope["skip_preflight"] = True
-    db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, body.created_by, now, now))
+    # Gap 3: detect if design_review needed
+    needs_rfc = logic.should_require_design_review(
+        body.risk_level, body.priority,
+        scope_includes=body.scope_includes if body.scope_includes else None)
+    if needs_rfc:
+        scope["require_design_review"] = True
+    db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,domain,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, body.domain, body.created_by, now, now))
     log_event(db(), "ticket_created", body.id, new_value=phase); db().commit()
     return {"id": body.id, "phase": phase, "blocked_by": blocked_by, "skip_preflight": body.skip_preflight,
-            "test_specs": len(body.test_specs)}
+            "design_review_required": needs_rfc, "domain": body.domain, "test_specs": len(body.test_specs)}
 
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
@@ -328,9 +334,15 @@ def submit_ticket(tid: str, body: TicketSubmit):
     else:
         # Non-impl phases: validate evidence normally
         ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
-        ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
-        if not ev_check.ok:
-            raise HTTPException(400, ev_check.error)
+        # Gap 1: monitoring phase requires health_check + error_rate evidence
+        if phase == "monitoring":
+            mon_check = logic.validate_monitoring_evidence(ev_dicts)
+            if not mon_check.ok:
+                raise HTTPException(400, mon_check.error)
+        else:
+            ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
+            if not ev_check.ok:
+                raise HTTPException(400, ev_check.error)
 
     # ── I/O: write ──
     # Record agent-submitted evidence
@@ -383,8 +395,26 @@ def reject_ticket(tid: str, body: TicketReject):
         db().execute("UPDATE certifications SET tasks_failed=tasks_failed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, coder_id, coder_role))
     if t["assigned_to"]:
         db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, t["assigned_to"]))
-    log_event(db(), "rejected", tid, rejector, t["phase"], next_phase, json.dumps({"reason": body.reason, "round": rounds})); db().commit()
-    return {"ticket_id": tid, "phase": next_phase, "review_round": rounds, "rejected_by": rejector}
+    log_event(db(), "rejected", tid, rejector, t["phase"], next_phase, json.dumps({"reason": body.reason, "round": rounds}))
+
+    # Gap 2: Auto-trigger post-mortem when review_rounds >= 2
+    post_mortem = None
+    if rounds >= 2:
+        all_blockers = [c["content"] for c in db().execute(
+            "SELECT content FROM comments WHERE ticket_id=? AND comment_type='blocker'",
+            (tid,)).fetchall()]
+        pm = logic.analyze_post_mortem(rounds, all_blockers)
+        if pm.should_trigger:
+            db().execute(
+                "INSERT INTO post_mortems (ticket_id,trigger_reason,pattern,action_items,created_at) VALUES(?,?,?,?,?)",
+                (tid, pm.reason, ",".join(pm.patterns), json.dumps(pm.action_items), now))
+            post_mortem = {"patterns": pm.patterns, "action_items": pm.action_items}
+
+    db().commit()
+    result = {"ticket_id": tid, "phase": next_phase, "review_round": rounds, "rejected_by": rejector}
+    if post_mortem:
+        result["post_mortem"] = post_mortem
+    return result
 
 @app.post("/tickets/{tid}/advance")
 def advance_ticket(tid: str, body: TicketAdvance):
@@ -493,12 +523,15 @@ def inbox(agent_id: str):
 @app.get("/attention")
 def attention():
     now = now_ms()
-    review = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase IN ('preflight_review','code_review','merge_ready') AND assigned_to IS NULL ORDER BY priority DESC").fetchall()]
+    review = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase IN ('preflight_review','design_review','code_review','merge_ready') AND assigned_to IS NULL ORDER BY priority DESC").fetchall()]
     expired = [row_to_dict(r) for r in db().execute("SELECT id,assigned_to,phase FROM tickets WHERE locked_at IS NOT NULL AND locked_at+lock_ttl_ms<?", (now,)).fetchall()]
     stuck = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase IN ('rework','preflight_rework') AND review_rounds>=3").fetchall()]
     pending_exams = [row_to_dict(r) for r in db().execute("SELECT agent_id,role_id,score FROM certifications WHERE status='pending_review'").fetchall()]
-    return {"needs_review": review, "expired_locks": expired, "stuck_in_rework": stuck, "pending_exams": pending_exams,
-            "summary": {"review": len(review), "expired": len(expired), "stuck": len(stuck), "exams": len(pending_exams)}}
+    monitoring = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase='monitoring'").fetchall()]
+    return {"needs_review": review, "expired_locks": expired, "stuck_in_rework": stuck,
+            "pending_exams": pending_exams, "monitoring": monitoring,
+            "summary": {"review": len(review), "expired": len(expired), "stuck": len(stuck),
+                        "exams": len(pending_exams), "monitoring": len(monitoring)}}
 
 @app.get("/status")
 def status():
@@ -515,8 +548,62 @@ def events(ticket_id: str = None, agent_id: str = None, limit: int = 50):
     else: rows = db().execute("SELECT * FROM event_log ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall()
     return {"events": [row_to_dict(r) for r in rows]}
 
+# ── Gap 4: DORA Metrics ──────────────────────────────────────
+
+@app.get("/metrics/dora")
+def dora_metrics(window_days: int = 30):
+    """Calculate DORA metrics from event log."""
+    now = now_ms()
+    rows = db().execute("SELECT * FROM event_log ORDER BY timestamp").fetchall()
+    events_list = [row_to_dict(r) for r in rows]
+    metrics = logic.calculate_dora(events_list, now, window_days)
+    # Format for readability
+    lead_time_hours = metrics.lead_time_ms / 3600000 if metrics.lead_time_ms else 0
+    mttr_hours = metrics.mttr_ms / 3600000 if metrics.mttr_ms else 0
+    return {
+        "window_days": window_days,
+        "deployment_frequency": f"{metrics.deployment_frequency:.3f} per day",
+        "lead_time": f"{lead_time_hours:.1f} hours",
+        "change_failure_rate": f"{metrics.change_failure_rate:.1%}",
+        "mttr": f"{mttr_hours:.1f} hours",
+        "raw": {
+            "deployment_frequency": metrics.deployment_frequency,
+            "lead_time_ms": metrics.lead_time_ms,
+            "change_failure_rate": metrics.change_failure_rate,
+            "mttr_ms": metrics.mttr_ms,
+        }
+    }
+
+# ── Gap 2: Post-Mortem ───────────────────────────────────────
+
+@app.get("/post-mortems")
+def list_post_mortems():
+    rows = db().execute("SELECT * FROM post_mortems ORDER BY created_at DESC").fetchall()
+    return {"post_mortems": [_pj(row_to_dict(r)) for r in rows]}
+
+@app.get("/post-mortems/{ticket_id}")
+def get_post_mortem(ticket_id: str):
+    """Analyze a ticket for post-mortem (can be called manually or auto-triggered)."""
+    t = db().execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not t: raise HTTPException(404)
+    # Gather all blocker comments
+    comments = db().execute(
+        "SELECT content FROM comments WHERE ticket_id=? AND comment_type='blocker'",
+        (ticket_id,)).fetchall()
+    blockers = [c["content"] for c in comments]
+    result = logic.analyze_post_mortem(t["review_rounds"] or 0, blockers)
+    return {
+        "ticket_id": ticket_id,
+        "review_rounds": t["review_rounds"],
+        "should_trigger": result.should_trigger,
+        "reason": result.reason,
+        "patterns": result.patterns,
+        "action_items": result.action_items
+    }
+
 def main():
     import argparse; p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1"); p.add_argument("--port", type=int, default=9800)
     a = p.parse_args(); logging.basicConfig(level=logging.INFO)
     uvicorn.run(app, host=a.host, port=a.port)
+
