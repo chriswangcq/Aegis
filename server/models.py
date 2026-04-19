@@ -4,6 +4,20 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+# ── Projects ─────────────────────────────────────────────────
+
+class ProjectCreate(BaseModel):
+    id: str                                    # e.g. "novaic-gateway"
+    name: str                                  # display name
+    description: str = ""
+    repo_url: str = ""                         # https://github.com/org/repo
+    repo_path: str = ""                        # local clone path for CI runner
+    tech_stack: list[str] = Field(default_factory=list)  # ["python","typescript"]
+    conventions: dict = Field(default_factory=dict)      # coding standards
+    default_domain: str = ""                   # default domain for tickets
+    master_id: str = ""                        # assigned master agent
+
+
 class EvidenceItem(BaseModel):
     evidence_type: str
     content: str
@@ -12,6 +26,7 @@ class EvidenceItem(BaseModel):
 
 class TicketCreate(BaseModel):
     id: str
+    project_id: str = ""  # which project this ticket belongs to
     title: str
     description: str = ""
     priority: int = 0
@@ -22,7 +37,7 @@ class TicketCreate(BaseModel):
     checklist: list[str] = Field(default_factory=list)
     test_specs: list[dict] = Field(default_factory=list)  # Master-defined test scenarios
     skip_preflight: bool = False  # simple tickets can go straight to implementation
-    domain: str = ""               # Gap 5: python/typescript/infra/frontend
+    domain: str = ""               # python/typescript/infra/frontend
     created_by: str = "master"
 
 

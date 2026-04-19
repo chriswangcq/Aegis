@@ -71,9 +71,26 @@ def get_db(path: Path | None = None) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection):
     conn.executescript("""
+    -- ── Projects ─────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS projects (
+        id             TEXT PRIMARY KEY,
+        name           TEXT NOT NULL,
+        description    TEXT DEFAULT '',
+        repo_url       TEXT DEFAULT '',              -- https://github.com/org/repo
+        repo_path      TEXT DEFAULT '',              -- local clone path for CI runner
+        tech_stack     TEXT DEFAULT '[]',            -- ["python","typescript"]
+        conventions    TEXT DEFAULT '{}',            -- coding standards JSON
+        default_domain TEXT DEFAULT '',              -- default domain for new tickets
+        master_id      TEXT,                         -- assigned master agent
+        status         TEXT DEFAULT 'active',        -- active / archived
+        created_at     INTEGER,
+        updated_at     INTEGER
+    );
+
     -- ── Tickets ──────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS tickets (
         id             TEXT PRIMARY KEY,
+        project_id     TEXT REFERENCES projects(id), -- belongs to a project
         title          TEXT NOT NULL,
         description    TEXT DEFAULT '',
         phase          TEXT NOT NULL DEFAULT 'planning',
@@ -89,7 +106,7 @@ def init_schema(conn: sqlite3.Connection):
         branch         TEXT,
         priority       INTEGER DEFAULT 0,
         risk_level     TEXT DEFAULT 'normal',
-        domain         TEXT DEFAULT '',              -- Gap 5: python/typescript/infra/frontend
+        domain         TEXT DEFAULT '',
         review_rounds  INTEGER DEFAULT 0,
         created_by     TEXT,
         created_at     INTEGER,
@@ -219,6 +236,7 @@ def init_schema(conn: sqlite3.Connection):
 
     -- ── Indexes ─────────────────────────────────────────────
     CREATE INDEX IF NOT EXISTS idx_tickets_phase ON tickets(phase);
+    CREATE INDEX IF NOT EXISTS idx_tickets_project ON tickets(project_id);
     CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
     CREATE INDEX IF NOT EXISTS idx_certifications_agent ON certifications(agent_id);
     CREATE INDEX IF NOT EXISTS idx_certifications_role ON certifications(role_id);

@@ -194,6 +194,54 @@ def get_ticket(tid: str):
     r["open_blockers"] = db().execute("SELECT COUNT(*) as c FROM comments WHERE ticket_id=? AND comment_type='blocker' AND status='open'", (tid,)).fetchone()["c"]
     return r
 
+# ── Projects ─────────────────────────────────────────────────
+
+@app.post("/projects")
+def create_project(body: ProjectCreate):
+    now = now_ms()
+    db().execute(
+        "INSERT INTO projects (id,name,description,repo_url,repo_path,tech_stack,conventions,default_domain,master_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (body.id, body.name, body.description, body.repo_url, body.repo_path,
+         json.dumps(body.tech_stack), json.dumps(body.conventions),
+         body.default_domain, body.master_id, now, now))
+    log_event(db(), "project_created", body.id, body.master_id)
+    db().commit()
+    return {"id": body.id, "name": body.name, "master_id": body.master_id,
+            "repo_url": body.repo_url}
+
+@app.get("/projects")
+def list_projects(status: str = "active"):
+    rows = db().execute("SELECT * FROM projects WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
+    return {"projects": [_pj(row_to_dict(r)) for r in rows]}
+
+@app.get("/projects/{pid}")
+def get_project(pid: str):
+    p = db().execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    if not p: raise HTTPException(404)
+    r = _pj(row_to_dict(p))
+    # Project dashboard
+    tickets = db().execute("SELECT id,title,phase,priority,assigned_to,domain FROM tickets WHERE project_id=? ORDER BY priority DESC", (pid,)).fetchall()
+    r["tickets"] = [row_to_dict(t) for t in tickets]
+    r["ticket_summary"] = {}
+    for t in tickets:
+        phase = t["phase"]
+        r["ticket_summary"][phase] = r["ticket_summary"].get(phase, 0) + 1
+    # Project-level DORA
+    events = [row_to_dict(e) for e in db().execute(
+        "SELECT * FROM event_log WHERE ticket_id IN (SELECT id FROM tickets WHERE project_id=?) ORDER BY timestamp",
+        (pid,)).fetchall()]
+    if events:
+        metrics = logic.calculate_dora(events, now_ms(), 30)
+        r["dora"] = {
+            "deployment_frequency": metrics.deployment_frequency,
+            "lead_time_ms": metrics.lead_time_ms,
+            "change_failure_rate": metrics.change_failure_rate,
+            "mttr_ms": metrics.mttr_ms,
+        }
+    return r
+
+# ── Tickets ──────────────────────────────────────────────────
+
 @app.post("/tickets")
 def create_ticket(body: TicketCreate):
     now = now_ms()
@@ -206,6 +254,16 @@ def create_ticket(body: TicketCreate):
         row = db().execute("SELECT phase FROM tickets WHERE id=?", (dep,)).fetchone()
         if row and row["phase"] != "done": blocked_by = dep; break
     phase = "ready" if not blocked_by else "planning"
+
+    # Inherit project defaults if project_id specified
+    project = None
+    domain = body.domain
+    if body.project_id:
+        project = db().execute("SELECT * FROM projects WHERE id=?", (body.project_id,)).fetchone()
+        if not project: raise HTTPException(404, f"Project '{body.project_id}' not found")
+        if not domain and project["default_domain"]:
+            domain = project["default_domain"]
+
     # Store skip_preflight in scope_json
     if body.skip_preflight:
         scope["skip_preflight"] = True
@@ -215,11 +273,12 @@ def create_ticket(body: TicketCreate):
         scope_includes=body.scope_includes if body.scope_includes else None)
     if needs_rfc:
         scope["require_design_review"] = True
-    db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,domain,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, body.domain, body.created_by, now, now))
+    db().execute("INSERT INTO tickets (id,project_id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,domain,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (body.id, body.project_id or None, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, domain, body.created_by, now, now))
     log_event(db(), "ticket_created", body.id, new_value=phase); db().commit()
-    return {"id": body.id, "phase": phase, "blocked_by": blocked_by, "skip_preflight": body.skip_preflight,
-            "design_review_required": needs_rfc, "domain": body.domain, "test_specs": len(body.test_specs)}
+    return {"id": body.id, "project_id": body.project_id or None, "phase": phase, "blocked_by": blocked_by,
+            "skip_preflight": body.skip_preflight, "design_review_required": needs_rfc,
+            "domain": domain, "test_specs": len(body.test_specs)}
 
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
@@ -290,14 +349,21 @@ def submit_ticket(tid: str, body: TicketSubmit):
     verification_mode = "agent_reported"  # default: trust agent evidence
 
     # ── System: CC-executed verification (Option B) ──
-    if body.repo_path and phase in ("implementation", "rework"):
+    # Resolve repo_path: agent-specified > project default
+    repo_path = body.repo_path
+    if not repo_path and t["project_id"]:
+        proj = db().execute("SELECT repo_path FROM projects WHERE id=?", (t["project_id"],)).fetchone()
+        if proj and proj["repo_path"]:
+            repo_path = proj["repo_path"]
+
+    if repo_path and phase in ("implementation", "rework"):
         import os
-        if not os.path.isdir(body.repo_path):
-            raise HTTPException(400, f"repo_path '{body.repo_path}' does not exist")
+        if not os.path.isdir(repo_path):
+            raise HTTPException(400, f"repo_path '{repo_path}' does not exist")
 
         from . import ci_runner
         ci_results = ci_runner.run_all_gates(
-            body.repo_path, test_specs=test_specs, checklist=checklist
+            repo_path, test_specs=test_specs, checklist=checklist
         )
         verification_mode = "system_executed"
 
