@@ -200,10 +200,10 @@ def get_ticket(tid: str):
 def create_project(body: ProjectCreate):
     now = now_ms()
     db().execute(
-        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,default_domain,master_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (body.id, body.name, body.description, body.repo_url,
          json.dumps(body.tech_stack), json.dumps(body.conventions),
-         body.default_domain, body.master_id, now, now))
+         body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
     log_event(db(), "project_created", body.id, body.master_id)
     db().commit()
     return {"id": body.id, "name": body.name, "master_id": body.master_id,
@@ -273,12 +273,15 @@ def create_ticket(body: TicketCreate):
         scope_includes=body.scope_includes if body.scope_includes else None)
     if needs_rfc:
         scope["require_design_review"] = True
-    db().execute("INSERT INTO tickets (id,project_id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,domain,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (body.id, body.project_id or None, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, domain, body.created_by, now, now))
+    # Calculate canary plan based on risk
+    canary = logic.calculate_canary_plan(body.risk_level, body.priority)
+    db().execute("INSERT INTO tickets (id,project_id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,domain,canary_plan,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (body.id, body.project_id or None, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, domain, json.dumps(canary.stages), body.created_by, now, now))
     log_event(db(), "ticket_created", body.id, new_value=phase); db().commit()
     return {"id": body.id, "project_id": body.project_id or None, "phase": phase, "blocked_by": blocked_by,
             "skip_preflight": body.skip_preflight, "design_review_required": needs_rfc,
-            "domain": domain, "test_specs": len(body.test_specs)}
+            "domain": domain, "test_specs": len(body.test_specs),
+            "canary_plan": canary.stages}
 
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
@@ -644,6 +647,163 @@ def get_post_mortem(ticket_id: str):
         "patterns": result.patterns,
         "action_items": result.action_items
     }
+
+# ── CANARY / MONITORING / ROLLBACK ────────────────────────────
+
+@app.post("/tickets/{tid}/canary/check")
+def canary_health_check(tid: str, body: MetricsReport):
+    """Report metrics for a canary deployment. Aegis decides: promote, hold, or rollback."""
+    now = now_ms()
+    t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
+    if not t: raise HTTPException(404)
+    if t["phase"] != "monitoring":
+        raise HTTPException(409, f"Ticket is in '{t['phase']}', not monitoring")
+
+    stages = json.loads(t["canary_plan"] or "[]") or [25, 100]
+    current_stage = t["canary_stage"] or stages[0]
+
+    # Build MetricsSnapshot
+    current = logic.MetricsSnapshot(
+        error_rate=body.error_rate, latency_p50_ms=body.latency_p50_ms,
+        latency_p99_ms=body.latency_p99_ms, request_rate=body.request_rate,
+        saturation=body.saturation, timestamp_ms=now)
+
+    # Evaluate health (no baseline for now — use thresholds only)
+    health = logic.evaluate_health(current, baseline=None)
+
+    # Record as evidence
+    verdict = "pass" if health.ok else "fail"
+    db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
+                 (tid, "monitoring", "system", "canary_health",
+                  json.dumps({"stage": current_stage, "error_rate": body.error_rate,
+                              "latency_p99": body.latency_p99_ms, "saturation": body.saturation}),
+                  verdict, now))
+
+    # Check rollback
+    rollback_check = logic.should_auto_rollback(body.error_rate)
+    if not rollback_check.ok:
+        # Auto-create rollback ticket
+        branch = t["branch"] or "main"
+        plan = logic.create_rollback_plan(tid, branch, rollback_check.error)
+        db().execute("INSERT INTO tickets (id,project_id,title,description,phase,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (plan.ticket_id, t["project_id"], f"ROLLBACK: {t['title']}",
+                      plan.reason, "ready", 5, "critical", "system", now, now))
+        db().execute("UPDATE tickets SET canary_stage=0,updated_at=? WHERE id=?", (now, tid))
+        log_event(db(), "auto_rollback", tid, "system", "monitoring", "rollback")
+
+        # Send alert webhook if configured
+        if t["project_id"]:
+            proj = db().execute("SELECT webhook_url,risk_level FROM projects WHERE id=?", (t["project_id"],)).fetchone()
+            alert = logic.build_alert(tid, t["project_id"], health, t["risk_level"])
+            if alert and proj and proj["webhook_url"]:
+                _send_webhook(proj["webhook_url"], alert)
+
+        db().commit()
+        return {"action": "rollback", "rollback_ticket": plan.ticket_id,
+                "reason": rollback_check.error}
+
+    # Check promotion
+    promote = logic.should_promote_canary(
+        current_stage, stages, body.error_rate, body.latency_p99_ms)
+
+    if promote.ok and promote.data.get("action") == "promote":
+        next_stage = promote.data["to"]
+        db().execute("UPDATE tickets SET canary_stage=?,updated_at=? WHERE id=?", (next_stage, now, tid))
+        log_event(db(), "canary_promoted", tid, "system", str(current_stage), str(next_stage))
+        if next_stage >= 100:
+            # Full rollout → advance to done
+            db().execute("UPDATE tickets SET phase='done',canary_stage=100,updated_at=? WHERE id=?", (now, tid))
+            log_event(db(), "canary_complete", tid, "system", "monitoring", "done")
+        db().commit()
+        return {"action": "promote", "from": current_stage, "to": next_stage,
+                "health": "ok"}
+    elif promote.ok and promote.data.get("action") == "complete":
+        db().commit()
+        return {"action": "complete", "stage": 100, "health": "ok"}
+
+    db().commit()
+    return {"action": "hold", "stage": current_stage, "health": verdict,
+            "issues": health.data.get("issues", []) if health.data else []}
+
+
+@app.get("/tickets/{tid}/canary")
+def canary_status(tid: str):
+    """Get current canary deployment status."""
+    t = db().execute("SELECT id,phase,canary_stage,canary_plan,risk_level FROM tickets WHERE id=?", (tid,)).fetchone()
+    if not t: raise HTTPException(404)
+    stages = json.loads(t["canary_plan"] or "[]")
+    return {"ticket_id": tid, "phase": t["phase"],
+            "canary_stage": t["canary_stage"], "canary_plan": stages}
+
+
+@app.post("/projects/{pid}/check-deps")
+def check_project_deps(pid: str):
+    """Check dependency pinning for a project via git clone."""
+    proj = db().execute("SELECT repo_url,tech_stack FROM projects WHERE id=?", (pid,)).fetchone()
+    if not proj: raise HTTPException(404)
+
+    from . import ci_runner
+    work_dir, error = ci_runner.checkout_repo(proj["repo_url"])
+    if error:
+        return {"project_id": pid, "status": "error", "detail": error.detail}
+
+    import os, shutil
+    try:
+        results = []
+        # Check requirements.txt
+        req_path = os.path.join(work_dir, "requirements.txt")
+        if os.path.exists(req_path):
+            content = open(req_path).read()
+            r = logic.check_deps_manifest(content)
+            results.append({"file": "requirements.txt", "ok": r.ok,
+                           "detail": r.error if not r.ok else "All pinned"})
+
+        # Check package.json (basic)
+        pkg_path = os.path.join(work_dir, "package.json")
+        if os.path.exists(pkg_path):
+            results.append({"file": "package.json", "ok": True, "detail": "Found"})
+
+        return {"project_id": pid, "status": "ok" if all(r["ok"] for r in results) else "warn",
+                "checks": results}
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@app.post("/tickets/{tid}/check-owners")
+def check_file_owners(tid: str, changed_files: list[str], reviewer_id: str):
+    """Check if reviewer has file-level ownership for a review."""
+    t = db().execute("SELECT project_id FROM tickets WHERE id=?", (tid,)).fetchone()
+    if not t: raise HTTPException(404)
+    if not t["project_id"]:
+        return {"ok": True, "detail": "No project, no ownership rules"}
+
+    proj = db().execute("SELECT conventions FROM projects WHERE id=?", (t["project_id"],)).fetchone()
+    conventions = json.loads(proj["conventions"] or "{}") if proj else {}
+    owners_map = conventions.get("owners_map", {})
+
+    result = logic.check_file_ownership(changed_files, owners_map, reviewer_id)
+    return {"ok": result.ok, "detail": result.error if not result.ok else "All files owned by reviewer",
+            "data": result.data}
+
+
+def _send_webhook(url: str, alert: logic.AlertPayload):
+    """Send alert to webhook URL (fire-and-forget)."""
+    import urllib.request
+    payload = json.dumps({
+        "severity": alert.severity,
+        "title": alert.title,
+        "description": alert.description,
+        "ticket_id": alert.ticket_id,
+        "project_id": alert.project_id,
+        "metrics": alert.metrics
+    }).encode()
+    try:
+        req = urllib.request.Request(url, data=payload,
+                                      headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        logger.warning(f"Webhook failed: {url} → {e}")
+
 
 def main():
     import argparse; p = argparse.ArgumentParser()

@@ -76,12 +76,14 @@ def init_schema(conn: sqlite3.Connection):
         id             TEXT PRIMARY KEY,
         name           TEXT NOT NULL,
         description    TEXT DEFAULT '',
-        repo_url       TEXT NOT NULL,                -- https://github.com/org/repo (唯一代码来源)
-        tech_stack     TEXT DEFAULT '[]',            -- ["python","typescript"]
-        conventions    TEXT DEFAULT '{}',            -- coding standards JSON
-        default_domain TEXT DEFAULT '',              -- default domain for new tickets
-        master_id      TEXT,                         -- assigned master agent
-        status         TEXT DEFAULT 'active',        -- active / archived
+        repo_url       TEXT NOT NULL,
+        tech_stack     TEXT DEFAULT '[]',
+        conventions    TEXT DEFAULT '{}',            -- coding standards + owners_map
+        default_domain TEXT DEFAULT '',
+        master_id      TEXT,
+        status         TEXT DEFAULT 'active',
+        metrics_url    TEXT DEFAULT '',              -- prometheus /metrics endpoint
+        webhook_url    TEXT DEFAULT '',              -- alert webhook (slack/discord)
         created_at     INTEGER,
         updated_at     INTEGER
     );
@@ -107,6 +109,8 @@ def init_schema(conn: sqlite3.Connection):
         risk_level     TEXT DEFAULT 'normal',
         domain         TEXT DEFAULT '',
         review_rounds  INTEGER DEFAULT 0,
+        canary_stage   INTEGER DEFAULT 0,            -- current canary %, 0=not deployed
+        canary_plan    TEXT DEFAULT '[]',             -- [1,5,25,100]
         created_by     TEXT,
         created_at     INTEGER,
         updated_at     INTEGER

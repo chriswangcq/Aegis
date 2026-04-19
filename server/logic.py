@@ -518,3 +518,276 @@ def check_domain_match(agent_domain_trust: dict, ticket_domain: str,
     return Result(ok=True, data={"domain_trust": trust})
 
 
+# ═══════════════════════════════════════════════════════════════
+# Gap 1: Canary 灰度 — staged rollout percentages
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class CanaryPlan:
+    stages: list[int]        # e.g. [1, 5, 25, 100]
+    hold_minutes: int        # how long to hold at each stage
+    auto_promote: bool       # auto-promote if metrics healthy
+
+def calculate_canary_plan(risk_level: str, priority: int) -> CanaryPlan:
+    """Determine canary rollout stages based on ticket risk/priority.
+
+    Higher risk = more stages = slower rollout.
+    """
+    if risk_level in ("critical",):
+        return CanaryPlan(stages=[1, 5, 10, 25, 50, 100], hold_minutes=30, auto_promote=False)
+    if risk_level in ("high",):
+        return CanaryPlan(stages=[1, 5, 25, 100], hold_minutes=15, auto_promote=False)
+    if priority >= 4:
+        return CanaryPlan(stages=[5, 25, 100], hold_minutes=10, auto_promote=True)
+    return CanaryPlan(stages=[25, 100], hold_minutes=5, auto_promote=True)
+
+
+def should_promote_canary(current_stage: int, stages: list[int],
+                          error_rate: float, latency_p99_ms: float,
+                          baseline_error_rate: float = 0.0,
+                          baseline_latency_ms: float = 0.0,
+                          error_threshold: float = 0.05,
+                          latency_ratio: float = 2.0) -> Result:
+    """Decide whether to promote canary to next stage.
+
+    Rules:
+      - error_rate must be < baseline + threshold
+      - latency p99 must be < baseline × ratio
+      - Both must hold for promotion
+    """
+    if current_stage >= max(stages):
+        return Result(ok=True, data={"action": "complete", "message": "Already at 100%"})
+
+    max_error = baseline_error_rate + error_threshold
+    max_latency = max(baseline_latency_ms * latency_ratio, 100.0)  # minimum 100ms
+
+    errors = []
+    if error_rate > max_error:
+        errors.append(f"error_rate {error_rate:.3f} > threshold {max_error:.3f}")
+    if latency_p99_ms > max_latency:
+        errors.append(f"latency_p99 {latency_p99_ms:.0f}ms > threshold {max_latency:.0f}ms")
+
+    if errors:
+        return Result(ok=False,
+                      error=f"Canary unhealthy at {current_stage}%: {'; '.join(errors)}",
+                      data={"action": "rollback", "current_stage": current_stage})
+
+    next_idx = stages.index(current_stage) + 1 if current_stage in stages else 0
+    next_stage = stages[next_idx] if next_idx < len(stages) else stages[-1]
+    return Result(ok=True,
+                  data={"action": "promote", "from": current_stage, "to": next_stage})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 2: Rollback 自动化
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class RollbackPlan:
+    ticket_id: str           # ROLLBACK-{original_ticket_id}
+    reason: str
+    original_branch: str
+    rollback_action: str     # "git_revert" | "redeploy_previous"
+
+def create_rollback_plan(original_ticket_id: str, original_branch: str,
+                         failure_reason: str) -> RollbackPlan:
+    """Create a rollback plan when monitoring detects issues."""
+    return RollbackPlan(
+        ticket_id=f"ROLLBACK-{original_ticket_id}",
+        reason=failure_reason,
+        original_branch=original_branch,
+        rollback_action="git_revert"
+    )
+
+
+def should_auto_rollback(error_rate: float, error_threshold: float = 0.10,
+                          consecutive_failures: int = 0,
+                          failure_threshold: int = 3) -> Result:
+    """Determine if automatic rollback should be triggered.
+
+    Triggers rollback if:
+      - error_rate exceeds threshold, OR
+      - consecutive health check failures >= threshold
+    """
+    reasons = []
+    if error_rate > error_threshold:
+        reasons.append(f"error_rate {error_rate:.3f} > threshold {error_threshold:.3f}")
+    if consecutive_failures >= failure_threshold:
+        reasons.append(f"consecutive_failures {consecutive_failures} >= {failure_threshold}")
+
+    if reasons:
+        return Result(ok=False,
+                      error=f"Auto-rollback triggered: {'; '.join(reasons)}",
+                      data={"trigger": True, "reasons": reasons})
+    return Result(ok=True, data={"trigger": False})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 3: Observability — metrics evaluation
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class MetricsSnapshot:
+    error_rate: float        # 0.0 - 1.0
+    latency_p50_ms: float
+    latency_p99_ms: float
+    request_rate: float      # requests per second
+    saturation: float        # 0.0 - 1.0 (CPU/memory utilization)
+    timestamp_ms: int
+
+def evaluate_health(current: MetricsSnapshot, baseline: MetricsSnapshot | None,
+                    error_threshold: float = 0.05,
+                    latency_ratio: float = 2.0,
+                    saturation_threshold: float = 0.85) -> Result:
+    """Evaluate service health by comparing current metrics to baseline.
+
+    Uses Google SRE's four golden signals: latency, traffic, errors, saturation.
+    """
+    issues = []
+
+    # Signal 1: Errors
+    if current.error_rate > error_threshold:
+        issues.append(f"error_rate={current.error_rate:.3f} (threshold={error_threshold})")
+
+    # Signal 2: Latency (compare to baseline if available)
+    if baseline and baseline.latency_p99_ms > 0:
+        ratio = current.latency_p99_ms / baseline.latency_p99_ms
+        if ratio > latency_ratio:
+            issues.append(f"latency_p99 degraded {ratio:.1f}x "
+                         f"({current.latency_p99_ms:.0f}ms vs baseline {baseline.latency_p99_ms:.0f}ms)")
+
+    # Signal 3: Traffic (drop > 50% is suspicious)
+    if baseline and baseline.request_rate > 0:
+        traffic_ratio = current.request_rate / baseline.request_rate
+        if traffic_ratio < 0.5:
+            issues.append(f"traffic dropped to {traffic_ratio:.0%} of baseline")
+
+    # Signal 4: Saturation
+    if current.saturation > saturation_threshold:
+        issues.append(f"saturation={current.saturation:.2f} (threshold={saturation_threshold})")
+
+    if issues:
+        return Result(ok=False,
+                      error=f"Health check failed: {'; '.join(issues)}",
+                      data={"healthy": False, "issues": issues, "signals": 4})
+    return Result(ok=True, data={"healthy": True, "signals": 4})
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 4: Alert webhook
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class AlertPayload:
+    severity: str            # "critical" | "warning" | "info"
+    title: str
+    description: str
+    ticket_id: str
+    project_id: str
+    metrics: dict
+
+def build_alert(ticket_id: str, project_id: str,
+                health_result: Result,
+                risk_level: str = "normal") -> AlertPayload | None:
+    """Build an alert payload if health check failed.
+
+    Returns None if no alert needed.
+    """
+    if health_result.ok:
+        return None
+
+    severity = "critical" if risk_level in ("high", "critical") else "warning"
+    issues = health_result.data.get("issues", []) if health_result.data else []
+
+    return AlertPayload(
+        severity=severity,
+        title=f"[{severity.upper()}] {ticket_id} deployment unhealthy",
+        description=health_result.error or "Health check failed",
+        ticket_id=ticket_id,
+        project_id=project_id,
+        metrics={"issues": issues}
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 5: Dependency audit
+# ═══════════════════════════════════════════════════════════════
+
+def check_deps_manifest(requirements_content: str) -> Result:
+    """Check if dependencies are pinned (not using >= or *)
+
+    Pinned deps = reproducible builds = fewer surprises in production.
+    """
+    unpinned = []
+    for line in requirements_content.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        # Check for unpinned patterns
+        if ">=" in line or ">" in line.split("==")[0]:
+            unpinned.append(line)
+        elif "*" in line:
+            unpinned.append(line)
+        elif "==" not in line and "@" not in line:
+            unpinned.append(line)
+
+    if unpinned:
+        return Result(ok=False,
+                      error=f"{len(unpinned)} unpinned dep(s): {', '.join(unpinned[:5])}",
+                      data={"unpinned": unpinned})
+    return Result(ok=True, data={"all_pinned": True})
+
+
+def check_known_vulnerabilities(dep_name: str, dep_version: str,
+                                 vuln_db: list[dict]) -> Result:
+    """Check a dependency against a vulnerability database.
+
+    vuln_db format: [{"package": "requests", "affected": "<2.28.0", "cve": "CVE-..."}]
+    """
+    matches = [v for v in vuln_db if v.get("package") == dep_name]
+    if not matches:
+        return Result(ok=True)
+
+    # Simplified version check (real impl would use packaging.version)
+    for vuln in matches:
+        return Result(ok=False,
+                      error=f"{dep_name}=={dep_version} has known vulnerability: {vuln.get('cve', 'unknown')}",
+                      data={"cve": vuln.get("cve"), "affected": vuln.get("affected")})
+    return Result(ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 6: File-level OWNERS
+# ═══════════════════════════════════════════════════════════════
+
+def check_file_ownership(changed_files: list[str],
+                          owners_map: dict[str, list[str]],
+                          reviewer_id: str) -> Result:
+    """Check if the reviewer has ownership of all changed files.
+
+    owners_map format: {"server/logic.py": ["agent-a"], "server/": ["agent-a", "agent-b"]}
+    Uses prefix matching: "server/" matches "server/logic.py", "server/main.py" etc.
+    """
+    if not owners_map:
+        return Result(ok=True)  # no ownership rules = anyone can review
+
+    unowned = []
+    for f in changed_files:
+        # Find the most specific matching owner rule
+        best_match = ""
+        owners = []
+        for pattern, pattern_owners in owners_map.items():
+            if f == pattern or f.startswith(pattern):
+                if len(pattern) > len(best_match):
+                    best_match = pattern
+                    owners = pattern_owners
+
+        if owners and reviewer_id not in owners:
+            unowned.append(f"'{f}' (owners: {owners})")
+
+    if unowned:
+        return Result(ok=False,
+                      error=f"Reviewer '{reviewer_id}' lacks ownership of: {'; '.join(unowned[:3])}",
+                      data={"unowned_files": unowned})
+    return Result(ok=True, data={"all_owned": True})
+

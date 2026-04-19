@@ -468,6 +468,204 @@ def test_domain_match_unknown_domain_default():
     assert r.ok  # default trust 0.5 > 0.3 threshold
 
 
+# ═══════════════════════════════════════════════════════════════
+# Gap 1: Canary 灰度
+# ═══════════════════════════════════════════════════════════════
+
+from server.logic import (calculate_canary_plan, should_promote_canary,
+                          create_rollback_plan, should_auto_rollback,
+                          MetricsSnapshot, evaluate_health, Result,
+                          build_alert, check_deps_manifest,
+                          check_known_vulnerabilities, check_file_ownership)
+
+def test_canary_plan_critical():
+    plan = calculate_canary_plan("critical", 5)
+    assert plan.stages == [1, 5, 10, 25, 50, 100]
+    assert plan.hold_minutes == 30
+    assert plan.auto_promote is False
+
+def test_canary_plan_normal():
+    plan = calculate_canary_plan("normal", 2)
+    assert plan.stages == [25, 100]
+    assert plan.auto_promote is True
+
+def test_canary_plan_high():
+    plan = calculate_canary_plan("high", 3)
+    assert plan.stages == [1, 5, 25, 100]
+    assert plan.hold_minutes == 15
+
+def test_canary_promote_healthy():
+    r = should_promote_canary(25, [25, 100], error_rate=0.01, latency_p99_ms=50.0)
+    assert r.ok
+    assert r.data["action"] == "promote"
+    assert r.data["to"] == 100
+
+def test_canary_promote_unhealthy():
+    r = should_promote_canary(25, [25, 100], error_rate=0.15, latency_p99_ms=50.0)
+    assert not r.ok
+    assert r.data["action"] == "rollback"
+
+def test_canary_already_complete():
+    r = should_promote_canary(100, [25, 100], error_rate=0.01, latency_p99_ms=50.0)
+    assert r.ok
+    assert r.data["action"] == "complete"
+
+def test_canary_latency_degradation():
+    r = should_promote_canary(25, [25, 100], error_rate=0.01, latency_p99_ms=250.0,
+                               baseline_latency_ms=50.0, latency_ratio=2.0)
+    assert not r.ok
+    assert "latency" in r.error
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 2: Rollback
+# ═══════════════════════════════════════════════════════════════
+
+def test_rollback_plan():
+    plan = create_rollback_plan("GW-01", "feat/dispatch", "error_rate too high")
+    assert plan.ticket_id == "ROLLBACK-GW-01"
+    assert plan.rollback_action == "git_revert"
+    assert "error_rate" in plan.reason
+
+def test_auto_rollback_triggered():
+    r = should_auto_rollback(0.15, error_threshold=0.10)
+    assert not r.ok
+    assert r.data["trigger"] is True
+
+def test_auto_rollback_safe():
+    r = should_auto_rollback(0.02, error_threshold=0.10)
+    assert r.ok
+    assert r.data["trigger"] is False
+
+def test_auto_rollback_consecutive():
+    r = should_auto_rollback(0.02, consecutive_failures=5, failure_threshold=3)
+    assert not r.ok
+    assert r.data["trigger"] is True
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 3: Observability
+# ═══════════════════════════════════════════════════════════════
+
+def test_health_all_good():
+    snap = MetricsSnapshot(error_rate=0.01, latency_p50_ms=10, latency_p99_ms=50,
+                           request_rate=100, saturation=0.5, timestamp_ms=1000)
+    r = evaluate_health(snap, baseline=None)
+    assert r.ok
+
+def test_health_error_rate_high():
+    snap = MetricsSnapshot(error_rate=0.15, latency_p50_ms=10, latency_p99_ms=50,
+                           request_rate=100, saturation=0.5, timestamp_ms=1000)
+    r = evaluate_health(snap, baseline=None)
+    assert not r.ok
+    assert "error_rate" in r.error
+
+def test_health_latency_degraded():
+    baseline = MetricsSnapshot(error_rate=0.01, latency_p50_ms=10, latency_p99_ms=50,
+                               request_rate=100, saturation=0.3, timestamp_ms=900)
+    current = MetricsSnapshot(error_rate=0.01, latency_p50_ms=20, latency_p99_ms=150,
+                              request_rate=100, saturation=0.3, timestamp_ms=1000)
+    r = evaluate_health(current, baseline)
+    assert not r.ok
+    assert "latency" in r.error
+
+def test_health_traffic_drop():
+    baseline = MetricsSnapshot(error_rate=0.01, latency_p50_ms=10, latency_p99_ms=50,
+                               request_rate=100, saturation=0.3, timestamp_ms=900)
+    current = MetricsSnapshot(error_rate=0.01, latency_p50_ms=10, latency_p99_ms=50,
+                              request_rate=30, saturation=0.3, timestamp_ms=1000)
+    r = evaluate_health(current, baseline)
+    assert not r.ok
+    assert "traffic" in r.error
+
+def test_health_saturation_high():
+    snap = MetricsSnapshot(error_rate=0.01, latency_p50_ms=10, latency_p99_ms=50,
+                           request_rate=100, saturation=0.95, timestamp_ms=1000)
+    r = evaluate_health(snap, baseline=None)
+    assert not r.ok
+    assert "saturation" in r.error
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 4: Alert
+# ═══════════════════════════════════════════════════════════════
+
+def test_alert_on_failure():
+    bad_health = Result(ok=False, error="error_rate too high",
+                        data={"issues": ["error_rate=0.15"]})
+    alert = build_alert("GW-01", "novaic-gw", bad_health, "high")
+    assert alert is not None
+    assert alert.severity == "critical"
+    assert "GW-01" in alert.title
+
+def test_no_alert_on_success():
+    good_health = Result(ok=True, data={"healthy": True})
+    alert = build_alert("GW-01", "novaic-gw", good_health)
+    assert alert is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 5: Dependency audit
+# ═══════════════════════════════════════════════════════════════
+
+def test_deps_all_pinned():
+    content = "fastapi==0.100.0\nuvicorn==0.23.0\npydantic==2.0.0"
+    r = check_deps_manifest(content)
+    assert r.ok
+
+def test_deps_unpinned():
+    content = "fastapi>=0.100.0\nuvicorn\npydantic==2.0.0"
+    r = check_deps_manifest(content)
+    assert not r.ok
+    assert "2 unpinned" in r.error
+
+def test_deps_comments_ignored():
+    content = "# this is a comment\nfastapi==0.100.0\n-r extra.txt"
+    r = check_deps_manifest(content)
+    assert r.ok
+
+def test_vuln_found():
+    vuln_db = [{"package": "requests", "affected": "<2.28.0", "cve": "CVE-2023-1234"}]
+    r = check_known_vulnerabilities("requests", "2.27.0", vuln_db)
+    assert not r.ok
+    assert "CVE-2023-1234" in r.error
+
+def test_vuln_clean():
+    vuln_db = [{"package": "requests", "affected": "<2.28.0", "cve": "CVE-2023-1234"}]
+    r = check_known_vulnerabilities("fastapi", "0.100.0", vuln_db)
+    assert r.ok
+
+
+# ═══════════════════════════════════════════════════════════════
+# Gap 6: File-level OWNERS
+# ═══════════════════════════════════════════════════════════════
+
+def test_owners_reviewer_is_owner():
+    owners = {"server/logic.py": ["agent-a", "agent-b"]}
+    r = check_file_ownership(["server/logic.py"], owners, "agent-a")
+    assert r.ok
+
+def test_owners_reviewer_not_owner():
+    owners = {"server/logic.py": ["agent-a"]}
+    r = check_file_ownership(["server/logic.py"], owners, "agent-b")
+    assert not r.ok
+    assert "agent-b" in r.error
+
+def test_owners_prefix_matching():
+    owners = {"server/": ["agent-a", "agent-b"]}
+    r = check_file_ownership(["server/logic.py", "server/main.py"], owners, "agent-a")
+    assert r.ok
+
+def test_owners_no_rules():
+    r = check_file_ownership(["anything.py"], {}, "anyone")
+    assert r.ok
+
+def test_owners_specific_overrides_prefix():
+    owners = {"server/": ["agent-a", "agent-b"], "server/logic.py": ["agent-a"]}
+    r = check_file_ownership(["server/logic.py"], owners, "agent-b")
+    assert not r.ok  # specific rule overrides prefix
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

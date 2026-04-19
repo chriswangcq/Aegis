@@ -11,10 +11,22 @@ class ProjectCreate(BaseModel):
     name: str                                  # display name
     description: str = ""
     repo_url: str                              # https://github.com/org/repo (required)
-    tech_stack: list[str] = Field(default_factory=list)  # ["python","typescript"]
-    conventions: dict = Field(default_factory=dict)      # coding standards
-    default_domain: str = ""                   # default domain for tickets
-    master_id: str = ""                        # assigned master agent
+    tech_stack: list[str] = Field(default_factory=list)
+    conventions: dict = Field(default_factory=dict)      # coding standards + owners_map
+    default_domain: str = ""
+    master_id: str = ""
+    metrics_url: str = ""                      # prometheus /metrics endpoint
+    webhook_url: str = ""                      # alert webhook (slack/discord/custom)
+
+
+# ── Canary / Monitoring ──────────────────────────────────────
+
+class MetricsReport(BaseModel):
+    error_rate: float = 0.0                    # 0.0 - 1.0
+    latency_p50_ms: float = 0.0
+    latency_p99_ms: float = 0.0
+    request_rate: float = 0.0                  # rps
+    saturation: float = 0.0                    # 0.0 - 1.0
 
 
 class EvidenceItem(BaseModel):
