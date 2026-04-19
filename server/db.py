@@ -79,6 +79,7 @@ def init_schema(conn: sqlite3.Connection):
         blocked_by     TEXT,
         scope_json     TEXT DEFAULT '{}',
         checklist_json TEXT DEFAULT '[]',
+        test_specs_json TEXT DEFAULT '[]',
         branch         TEXT,
         priority       INTEGER DEFAULT 0,
         risk_level     TEXT DEFAULT 'normal',

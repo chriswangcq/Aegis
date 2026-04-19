@@ -20,6 +20,7 @@ class TicketCreate(BaseModel):
     scope_includes: list[str] = Field(default_factory=list)
     scope_excludes: list[str] = Field(default_factory=list)
     checklist: list[str] = Field(default_factory=list)
+    test_specs: list[dict] = Field(default_factory=list)  # Master-defined test scenarios
     skip_preflight: bool = False  # simple tickets can go straight to implementation
     created_by: str = "master"
 
@@ -30,7 +31,9 @@ class TicketClaim(BaseModel):
 
 class TicketSubmit(BaseModel):
     agent_id: str
-    evidence: list[EvidenceItem] = Field(default_factory=list)
+    commit_sha: str = ""        # CC will checkout and verify itself
+    repo_path: str = ""         # path to repo root (for local execution)
+    evidence: list[EvidenceItem] = Field(default_factory=list)  # kept for backward compat
 
 
 class TicketAdvance(BaseModel):

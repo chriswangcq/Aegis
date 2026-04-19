@@ -209,10 +209,11 @@ def create_ticket(body: TicketCreate):
     # Store skip_preflight in scope_json
     if body.skip_preflight:
         scope["skip_preflight"] = True
-    db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), body.priority, body.risk_level, body.created_by, now, now))
+    db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,test_specs_json,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), json.dumps(body.test_specs), body.priority, body.risk_level, body.created_by, now, now))
     log_event(db(), "ticket_created", body.id, new_value=phase); db().commit()
-    return {"id": body.id, "phase": phase, "blocked_by": blocked_by, "skip_preflight": body.skip_preflight}
+    return {"id": body.id, "phase": phase, "blocked_by": blocked_by, "skip_preflight": body.skip_preflight,
+            "test_specs": len(body.test_specs)}
 
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
@@ -274,32 +275,73 @@ def submit_ticket(tid: str, body: TicketSubmit):
     bl = db().execute("SELECT COUNT(*) as c FROM comments WHERE ticket_id=? AND comment_type='blocker' AND status='open'", (tid,)).fetchone()["c"]
     if bl > 0: raise HTTPException(409, f"{bl} unresolved blocker(s)")
 
-    # ── Logic: validate evidence ──
-    ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
     checklist = json.loads(t["checklist_json"]) if t["checklist_json"] else []
-    ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
-    if not ev_check.ok:
-        raise HTTPException(400, ev_check.error)
+    try:
+        test_specs = json.loads(t["test_specs_json"]) if t["test_specs_json"] else []
+    except (IndexError, KeyError):
+        test_specs = []
+    ci_results = []
+    verification_mode = "agent_reported"  # default: trust agent evidence
 
-    # ── System: automated gates ──
-    gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
-    failed_gates = [g for g in gate_verdicts if not g.passed]
-    if failed_gates:
-        details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
-        raise HTTPException(400, {
-            "message": f"{len(failed_gates)} automated gate(s) failed",
-            "failed_gates": details,
-            "hint": "Fix these issues and re-submit. Gates are automated — no human can override them."
-        })
+    # ── System: CC-executed verification (Option B) ──
+    if body.repo_path and phase in ("implementation", "rework"):
+        import os
+        if not os.path.isdir(body.repo_path):
+            raise HTTPException(400, f"repo_path '{body.repo_path}' does not exist")
+
+        from . import ci_runner
+        ci_results = ci_runner.run_all_gates(
+            body.repo_path, test_specs=test_specs, checklist=checklist
+        )
+        verification_mode = "system_executed"
+
+        failed = [r for r in ci_results if not r.passed]
+        if failed:
+            details = [{"gate": r.gate, "detail": r.detail, "output": r.output[:500]} for r in failed]
+            raise HTTPException(400, {
+                "message": f"{len(failed)} CI gate(s) failed (executed by Command Center)",
+                "failed_gates": details,
+                "verification_mode": "system_executed",
+                "hint": "Command Center ran these checks itself — results cannot be faked."
+            })
+    elif phase in ("implementation", "rework"):
+        # Fallback: agent-reported evidence — validate with logic gates
+        ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
+        ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
+        if not ev_check.ok:
+            raise HTTPException(400, ev_check.error)
+
+        gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
+        failed_gates = [g for g in gate_verdicts if not g.passed]
+        if failed_gates:
+            details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
+            raise HTTPException(400, {
+                "message": f"{len(failed_gates)} automated gate(s) failed",
+                "failed_gates": details,
+                "verification_mode": "agent_reported",
+                "hint": "Provide repo_path for system-executed verification (stronger guarantee)."
+            })
+        # Record agent-reported gates as evidence
+        for g in gate_verdicts:
+            db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
+                         (tid, phase, "system", "gate_agent_reported", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
+    else:
+        # Non-impl phases: validate evidence normally
+        ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
+        ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
+        if not ev_check.ok:
+            raise HTTPException(400, ev_check.error)
 
     # ── I/O: write ──
+    # Record agent-submitted evidence
     for ev in body.evidence:
         db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
                      (tid, phase, body.agent_id, ev.evidence_type, ev.content, ev.verdict, now))
-    # Record gate results as evidence too
-    for g in gate_verdicts:
+    # Record CI results as system evidence (tamper-proof)
+    for r in ci_results:
         db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
-                     (tid, phase, "system", "gate", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
+                     (tid, phase, "system", f"ci_{r.gate}", f"{r.detail}\n{r.output[:2000]}", "pass" if r.passed else "fail", now))
+
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,assigned_role=NULL,locked_at=NULL,updated_at=? WHERE id=?", (next_phase, now, tid))
     db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, body.agent_id))
     role = t["assigned_role"] or "coder"
@@ -307,8 +349,9 @@ def submit_ticket(tid: str, body: TicketSubmit):
     _trust(body.agent_id, role, tid, "commit_discipline", +0.02, f"clean submit from {phase}", priority=priority)
     db().execute("UPDATE certifications SET tasks_completed=tasks_completed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, body.agent_id, role))
     log_event(db(), "submitted", tid, body.agent_id, phase, next_phase); db().commit()
-    passed_gates = [g.gate for g in gate_verdicts if g.passed]
+    passed_gates = [r.gate for r in ci_results if r.passed]
     return {"ticket_id": tid, "previous_phase": phase, "new_phase": next_phase,
+            "verification_mode": verification_mode,
             "gates_passed": passed_gates}
 
 @app.post("/tickets/{tid}/reject")
