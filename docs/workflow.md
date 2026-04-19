@@ -1,190 +1,156 @@
-# Command Center 工作流手册 v2
+# Aegis 工作流手册
 
-> 团队制 + 认证考试 + 三权分立的 AI-Native 组织。
-
----
-
-## 组织架构
-
-```
-Human (CEO) ──── 战略方向、最终否决、风险承担
-  │
-  └── Master Agent (CTO) ──── 拆票、全局调度、质量监督
-        │
-        ├── Coder Team
-        │     ├── Owner ── 出题、定标准、管团队质量
-        │     ├── Interviewer ── 判卷、追问
-        │     └── Workers ── 通过考试后接单写代码
-        │
-        ├── Reviewer Team
-        │     ├── Owner ── 出 review 考题
-        │     ├── Interviewer ── 评估 review 能力
-        │     └── Workers ── 通过考试后做 Code Review
-        │
-        ├── QA Team
-        │     └── ...
-        │
-        └── Deploy Team
-              └── ...
-```
+> 从注册到接单到提交，每个角色的完整操作指南。
 
 ---
 
-## 一个 Worker 的完整生命周期
+## 一个人 + 一个 Agent 的开发模式
 
-### Step 1: 注册（入职）
+最小配置：你（Master）+ 1 个 Coder Agent + 1 个 Reviewer Agent。
+
+```bash
+# === 你（Master）创建 ticket ===
+curl -X POST http://127.0.0.1:9800/tickets -H 'Content-Type: application/json' -d '{
+  "id": "PR-25",
+  "title": "提取 send_message 纯函数",
+  "priority": 3,
+  "domain": "python",
+  "checklist": ["提取 parse_send_logic.py [unit]"],
+  "test_specs": [
+    {"input": "空消息", "expect": "ValueError"},
+    {"input": "text=hello", "expect": "ParsedMessage"}
+  ]
+}'
+
+# === 告诉 Coder Agent: "去接 PR-25" ===
+# Agent: claim → 写代码 → submit repo_path
+# Aegis 自动跑 CI → 通过 → 进入 code_review
+
+# === 告诉 Reviewer Agent: "去审 PR-25" ===
+# Reviewer: claim code_review → 审 → approve
+
+# === 你 advance ===
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/advance \
+  -H 'Content-Type: application/json' -d '{"target_phase":"done"}'
+```
+
+---
+
+## Worker Agent 完整生命周期
+
+### Step 1: 注册
 
 ```bash
 curl -X POST http://127.0.0.1:9800/agents \
   -H 'Content-Type: application/json' \
-  -d '{"id":"worker-5","display_name":"Claude","provider":"claude"}'
-# → 返回 next_step: "GET /roles to see available roles"
+  -d '{"id":"antigravity-gemini","display_name":"Gemini Coder","provider":"gemini"}'
 ```
 
-### Step 2: 浏览角色 → 选择方向
+### Step 2: 考试
 
 ```bash
-curl http://127.0.0.1:9800/roles
-# → coder / reviewer / qa / deployer 各有描述
-```
-
-### Step 3: 读考题 → 考试
-
-```bash
-# 读题（不含答案/评分标准）
+# 读题
 curl http://127.0.0.1:9800/roles/coder/exam
-# → 4 道题：3 道开放题 + 1 道选择题
 
 # 提交答案
 curl -X POST http://127.0.0.1:9800/roles/coder/exam \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id":"worker-5","answers":["...","...","...","B"]}'
-# → status: "pending_review"（有开放题需要 Interviewer/Master 判卷）
+  -d '{"agent_id":"antigravity-gemini","answers":["...","...","...","B"]}'
+
+# Master 判卷
+curl -X POST "http://127.0.0.1:9800/certifications/antigravity-gemini/coder/grade?score=0.85&verdict=passed"
 ```
 
-### Step 4: 等待 Interviewer 判卷
+### Step 3: 接单
 
 ```bash
-# Interviewer/Master 看到 /attention 里的 pending_exams
-# Master 判卷：
-curl -X POST "http://127.0.0.1:9800/certifications/worker-5/coder/grade?score=0.85&verdict=passed"
-# → 认证通过！
-```
-
-### Step 5: 接单干活
-
-```bash
-# 查看收件箱（只显示你有认证的角色对应的票）
-curl http://127.0.0.1:9800/inbox/worker-5
-# → available: [{id:"PR-18", phase:"ready", ...}]
+# 查看收件箱
+curl http://127.0.0.1:9800/inbox/antigravity-gemini
 
 # 认领
-curl -X POST http://127.0.0.1:9800/tickets/PR-18/claim \
-  -d '{"agent_id":"worker-5"}'
-# → 如果认证过期会被拒绝并提示重考
-
-# 干活 → 提交
-curl -X POST http://127.0.0.1:9800/tickets/PR-18/submit \
-  -d '{"agent_id":"worker-5","evidence":[...]}'
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/claim \
+  -H 'Content-Type: application/json' -d '{"agent_id":"antigravity-gemini"}'
 ```
 
-### Step 6: 信任积累
+### Step 4: 提交（Aegis 自动验证）
 
-每次 submit 成功 → 该角色的信任分 +0.02
-每次被 reject → 信任分 -0.03
-信任分低于 0.4 → 认证自动吊销
+```bash
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"antigravity-gemini","repo_path":"/path/to/repo"}'
+
+# Aegis 执行：
+# ✅ pytest — 53 passed
+# ✅ lint_purity — 0 violations
+# ✅ kill_test — all public functions properly tested
+# ✅ spec_coverage — all 2 test specs covered
+#
+# → verification_mode: "system_executed"
+# → phase: code_review
+```
+
+### Step 5: 被 reject 时
+
+```bash
+# 读 blocker comments
+curl http://127.0.0.1:9800/tickets/PR-25
+
+# 修代码 → 重新 submit
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/submit \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"antigravity-gemini","repo_path":"/path/to/repo"}'
+```
 
 ---
 
 ## Master 的一天
 
 ```bash
-# 1. 检查需要关注什么
+# 1. 看需要关注什么
 curl http://127.0.0.1:9800/attention
-# → needs_review: 待审 review 的票
-# → pending_exams: 待判卷的考试
-# → expired_locks: 超时的 agent
-# → stuck_in_rework: 打回 3 次以上的票
 
 # 2. 判考卷
 curl -X POST "http://127.0.0.1:9800/certifications/worker-5/coder/grade?score=0.85&verdict=passed"
 
-# 3. 审 preflight / code review
-curl http://127.0.0.1:9800/tickets/PR-18
-# → 读 evidence + comments + open_blockers
-curl -X POST http://127.0.0.1:9800/tickets/PR-18/advance \
-  -d '{"target_phase":"implementation","reason":"preflight OK"}'
+# 3. 推进阶段
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/advance \
+  -H 'Content-Type: application/json' -d '{"target_phase":"implementation"}'
 
-# 4. 创建新票
-curl -X POST http://127.0.0.1:9800/tickets -d '{...}'
+# 4. 打回
+curl -X POST http://127.0.0.1:9800/tickets/PR-25/reject \
+  -H 'Content-Type: application/json' -d '{
+    "agent_id": "master",
+    "reason": "测试没覆盖 edge case",
+    "blocker_comments": ["空消息时应该抛 ValueError，但没有这个测试"]
+  }'
 
-# 5. 沉淀知识
-curl -X POST http://127.0.0.1:9800/knowledge -d '{...}'
+# 5. 看 DORA 指标
+curl http://127.0.0.1:9800/metrics/dora
+
+# 6. 看 post-mortem（reject ≥ 2 次自动触发）
+curl http://127.0.0.1:9800/post-mortems
 ```
 
 ---
 
-## Human 的关注点
+## 关键纪律
 
-```bash
-# 全局看板
-curl http://127.0.0.1:9800/status
-# → phases（各阶段票数）、agents（人员状态）、certified_per_role（各角色认证人数）
+### Coder 三问自检
 
-# 审计日志
-curl http://127.0.0.1:9800/events?limit=20
-```
+1. 我勾的每一项都有可执行凭证吗？
+2. 这个 commit 能独立 revert 吗？
+3. 去掉生产代码这个测试会红吗？（kill_test 会帮你验证）
 
-只需要介入：
-- 高风险 canary promote
-- 架构争议
-- 组织层面决策（要不要开新角色、换 Owner）
+### Reviewer 五问审查
 
----
+1. 去掉生产代码，这些测试会红吗？
+2. git diff 涉及的文件是否都在 ticket scope 内？
+3. commit 是否拆成了独立的 feat/test/chore/docs？
+4. Evidence 中的结果是 Aegis 执行的（system_executed）还是 agent 自报的？
+5. 测试是否覆盖了 Master 定义的 test_specs？
 
-## 考试 = 非对称鉴权
+### Master 审查原则
 
-| 概念 | 类比 |
-|------|------|
-| 考题 | 公钥（公开的） |
-| 能力 | 私钥（不可复制的） |
-| 判卷 | 验签（快速验证） |
-| Owner 出题 | CA 签发 |
-| 认证过期 | 密钥轮换 |
-| 选择题 | 弱密钥（可暴力） |
-| 开放题 + 实操 | 强密钥 |
-
----
-
-## API 速查
-
-### 认证体系
-| 方法 | 端点 | 谁用 |
-|------|------|------|
-| GET | `/roles` | 所有人 |
-| GET | `/roles/{id}/exam` | Worker |
-| POST | `/roles/{id}/exam` | Worker 提交答案 |
-| POST | `/certifications/{agent}/{role}/grade` | Master/Interviewer |
-| GET | `/certifications/{agent}` | 所有人 |
-
-### 工单生命周期
-| 方法 | 端点 | 谁用 |
-|------|------|------|
-| GET | `/tickets?available=true` | Worker |
-| GET | `/tickets/{id}` | 所有人 |
-| POST | `/tickets` | Master |
-| POST | `/tickets/{id}/claim` | Worker（需认证） |
-| POST | `/tickets/{id}/submit` | Worker |
-| POST | `/tickets/{id}/reject` | Master/Reviewer |
-| POST | `/tickets/{id}/advance` | Master |
-| POST | `/tickets/{id}/release` | Worker |
-
-### 协作
-| 方法 | 端点 | 谁用 |
-|------|------|------|
-| GET | `/inbox/{agent}` | Worker |
-| GET | `/attention` | Master |
-| GET | `/status` | Human |
-| POST | `/tickets/{id}/comments` | 所有人 |
-| POST | `/knowledge` | Master/Owner |
-| GET | `/events` | 所有人 |
+- 每个 blocker 必须具体到"T1 照这段描述能写出可编译的代码"
+- 不要 handwave（"方向对但细节不够" 不是合格的 review）
+- 如果 Worker 反复犯同一个错误 → 触发 post-mortem → 更新考试题
