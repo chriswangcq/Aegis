@@ -1,331 +1,248 @@
-# Aegis
+# Aegis — AI-Native Engineering Governance Platform
 
-[![GitHub](https://img.shields.io/badge/GitHub-chriswangcq%2FAegis-blue)](https://github.com/chriswangcq/Aegis)
+Aegis is a centralized command center that lets **one person lead a team of AI agents** to build, test, review, and deploy software — with the same rigor as a top-tier engineering organization.
 
-**AI Agent Team Governance Engine** — 用制度代替信任，用自动化代替人盯人。
-
-Aegis 是一个独立的 HTTP 服务，为 AI agent 团队提供：认证考试、工单流水线、自动 CI 验证（kill_test / lint / spec coverage）、信任积累、post-mortem 知识循环、DORA 度量。
+## What Aegis Does
 
 ```
-你（Human）= Master → 拆票、定 spec、放行
-Agent A（gemini）= Coder → 写代码、提交 repo_path
-Agent B（claude）= Reviewer → 审代码（防自审：必须不同 provider）
-System（Aegis）= 自动验证 → pytest / lint / kill_test / spec_coverage
+You (Master) → Aegis → Agent Team → Code → CI → Deploy
+                 ↓
+          Everything audited, enforced, automated
 ```
+
+- **Ticket Lifecycle**: `ready → preflight → implementation → code_review → monitoring → done`
+- **CI via SSH**: Aegis SSHes into your ECS, clones the repo, runs tests — agents can't fake results
+- **Auto-Deploy**: Canary promotion auto-deploys to pre/prod
+- **Trust System**: Agents earn trust through certifications and successful deliveries
+- **Anti-Cheating**: Kill tests, spec coverage, cross-provider code review
 
 ## Quick Start
 
 ```bash
+# 1. Start Aegis
+cd novaic-command-center
 pip install -r requirements.txt
-python -m server.main          # http://127.0.0.1:9800
+python -m server.main --host 0.0.0.0 --port 9800
+
+# 2. Check health
+curl http://localhost:9800/status
 ```
+
+## Setup a Project
+
+### Step 1: Create Project with Environments
 
 ```bash
-# 74 unit tests, zero mock, <0.3s
-python -m pytest tests/test_logic.py -v
-
-# E2E lifecycle test
-python tests/e2e_lifecycle.py
+curl -X POST http://localhost:9800/projects \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "my-app",
+    "name": "My Application",
+    "repo_url": "https://github.com/your-org/my-app.git",
+    "tech_stack": ["python"],
+    "master_id": "master-agent",
+    "environments": {
+      "ci": {
+        "ssh_host": "10.0.1.1",
+        "ssh_user": "deploy",
+        "ssh_key_path": "~/.ssh/id_rsa",
+        "work_dir": "/opt/aegis-ci",
+        "install_command": "pip install -r requirements.txt",
+        "test_command": "python -m pytest tests/ -v --tb=short",
+        "lint_command": "ruff check .",
+        "timeout_seconds": 300
+      },
+      "pre": {
+        "ssh_host": "10.0.1.2",
+        "ssh_user": "deploy",
+        "deploy_command": "cd /opt/app && git pull origin main && systemctl restart my-app",
+        "health_check_url": "http://localhost:8000/status"
+      },
+      "prod": {
+        "ssh_host": "10.0.1.3",
+        "ssh_user": "deploy",
+        "deploy_command": "cd /opt/app && git pull origin main && systemctl restart my-app",
+        "health_check_url": "http://localhost:8000/status"
+      }
+    }
+  }'
 ```
 
-## Why Aegis?
-
-| | Vibe Coding | Aegis |
-|---|-------------|-------|
-| 第 1 次改动 | ✅ 快 | ✅ 稍慢但有测试 |
-| 第 50 次改动 | ❌ 可能引入回归，没人知道 | ✅ CC 在 submit 时拦住 |
-| 谁负责质量 | 你的眼睛 | 11 层自动防线 |
-| 知识沉淀 | 全在脑子里 | post-mortem → knowledge → 考试题 |
-| 安全成本 | O(n²) — 随代码量非线性增长 | O(1) — 每次改动同等安全 |
-
----
-
-## 目录
-
-- [组织架构](#组织架构)
-- [六个角色](#六个角色)
-- [Ticket 生命周期](#ticket-生命周期)
-- [11 层防线](#11-层防线)
-- [信任机制](#信任机制)
-- [DORA 指标](#dora-指标)
-- [API 端点](#api-端点)
-- [架构原则](#架构原则)
-- [项目结构](#项目结构)
-
----
-
-## 组织架构
-
-```mermaid
-graph TB
-    Human["🧑 Human Operator<br/>最终决策者"]
-    Master["👑 Master<br/>拆票 · 定 Spec · 放行"]
-    Coder["⚙️ Coder<br/>写代码 · 写测试"]
-    Reviewer["🔍 Reviewer<br/>审代码 · 审方案"]
-    QA["🧪 QA<br/>验行为 · 跑 E2E"]
-    Deployer["🚀 Deployer<br/>部署 · 监控"]
-    System["🛡️ Aegis<br/>自动验证 · 不可覆盖"]
-
-    Human -->|创建票 / 覆盖决策| Master
-    Master -->|分配| Coder
-    Master -->|分配| Reviewer
-    Master -->|分配| QA
-    Master -->|分配| Deployer
-    Coder -->|提交 repo_path| System
-    System -->|pytest · lint · kill_test · spec_cov| System
-    Reviewer -.->|语义审查| Coder
-    QA -.->|行为验证| Coder
-    Deployer -->|健康检查| System
-```
-
-## 六个角色
-
-### 👑 Master — 产品负责人
-
-| 能做 | 不能做 |
-|------|--------|
-| 创建 ticket（拆需求） | 写代码 |
-| 定义 test_specs（WHAT to test） | 写测试代码 |
-| 定义 checklist + `[unit]`/`[e2e]` 标签 | claim 非 master 阶段的票 |
-| advance / reject ticket | 跳过 CI gate |
-| 设定 domain / risk_level / priority | 给自己加 trust |
-
+Response:
 ```json
-POST /tickets
 {
-  "id": "PR-20",
-  "title": "提取 parse_send_payload 纯函数",
-  "priority": 4,
-  "risk_level": "high",
-  "domain": "python",
-  "checklist": ["提取 parse_send_logic.py [unit]", "改造 send_action [e2e]"],
-  "test_specs": [
-    {"input": "空消息", "expect": "ValueError"},
-    {"input": "text='hello'", "expect": "ParsedMessage.text == 'hello'"}
-  ]
+  "id": "my-app",
+  "api_keys": {
+    "master": "aegis_my-app_master_xxx",
+    "agent": "aegis_my-app_agent_yyy",
+    "readonly": "aegis_my-app_readonly_zzz"
+  },
+  "environments": { "ci": {...}, "pre": {...}, "prod": {...} }
 }
 ```
 
-### ⚙️ Coder — 实现者
+### Step 2: Update Environment Later
 
-```json
-POST /tickets/PR-20/submit
-{
-  "agent_id": "antigravity-gemini",
-  "repo_path": "/path/to/repo"
-}
-// Aegis 自己跑 pytest + lint + kill_test + spec_coverage
-// 结果写入 evidence, agent_id = "system", verification_mode = "system_executed"
+```bash
+curl -X PATCH http://localhost:9800/projects/my-app \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "environments": {
+      "ci": { "ssh_host": "new-ci-host.com", ... }
+    }
+  }'
 ```
 
-### 🔍 Reviewer — 审查者
+### Step 3: Prepare Your ECS Machines
 
-防自审规则（硬性，Aegis 强制执行）：
-
-```
-antigravity-gemini 写的代码：
-  ├── antigravity-gemini 审  → ❌ 同 agent
-  ├── gemini-reviewer 审     → ❌ 同 provider (gemini)
-  └── cursor-claude 审       → ✅ 不同 provider
+**CI Machine** (10.0.1.1):
+```bash
+sudo apt install git python3 python3-pip -y
+mkdir -p /opt/aegis-ci
 ```
 
-### 🧪 QA — 验证行为是否符合 spec（不看代码）
+**Pre/Prod Machines** (10.0.1.2, 10.0.1.3):
+```bash
+# Your app should be deployed here already
+# deploy_command will git pull + restart the service
+sudo apt install git curl -y
+```
 
-### 🚀 Deployer — 部署 + 30 分钟 monitoring（需提交 health_check + error_rate 证据）
+**SSH Keys** — from the Aegis server:
+```bash
+ssh-copy-id deploy@10.0.1.1
+ssh-copy-id deploy@10.0.1.2
+ssh-copy-id deploy@10.0.1.3
+```
 
-### 🛡️ Aegis — 自动验证引擎（没有 override 接口，任何角色均不可绕过）
-
----
-
-## Ticket 生命周期
+## Full Ticket Lifecycle
 
 ```
-Master 创建 ticket (test_specs + checklist + domain + risk_level)
+┌─────────────┐   Agent takes exam
+│   ready      │   ←── Ticket created, waiting for assignment
+└──────┬───────┘
+       ▼
+┌─────────────┐   Agent writes design doc
+│  preflight   │   ←── Claim → Submit evidence → Master reviews
+└──────┬───────┘
+       ▼
+┌─────────────┐   Agent pushes code to git
+│  impl        │   ←── Claim → Submit branch
+│              │       Aegis SSH→CI: clone → install → test → lint
+│              │       ❌ Any gate fails → reject
+└──────┬───────┘
+       ▼
+┌─────────────┐   Different agent reviews (cross-provider enforced)
+│ code_review  │   ←── Anti-self-review: gemini can't review gemini's code
+└──────┬───────┘
+       ▼
+┌─────────────┐   Advance to monitoring → auto-deploy to PRE
+│  monitoring  │   ←── Canary: 5% → 25% → 100%
+│  (canary)    │       Report metrics → Aegis promotes/rollbacks
+│              │       Health check: 4 golden signals
+└──────┬───────┘
+       ▼
+┌─────────────┐   Canary=100% → auto-deploy to PROD
+│    done      │   ←── Full rollout, trust updated, unblocks dependents
+└──────────────┘
+```
+
+## API Reference
+
+### Projects
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/projects` | Create project (auto-provisions API keys) |
+| GET | `/projects` | List all projects |
+| GET | `/projects/{id}` | Get project detail + DORA metrics |
+| PATCH | `/projects/{id}` | Update environments, conventions, etc. |
+| POST | `/projects/{id}/deploy/{env}` | Manual deploy to pre/prod |
+
+### Tickets
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/tickets` | Create ticket under a project |
+| GET | `/tickets` | List tickets (filter by project, phase) |
+| GET | `/tickets/{id}` | Get ticket detail with evidence |
+| POST | `/tickets/{id}/claim` | Agent claims ticket |
+| POST | `/tickets/{id}/submit` | Submit work (triggers SSH CI for impl) |
+| POST | `/tickets/{id}/advance` | Master advances phase (auto-deploys to pre on monitoring) |
+| POST | `/tickets/{id}/release` | Agent releases ticket |
+
+### CI / Deploy / Monitoring
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/tickets/{id}/canary/check` | Report canary metrics → promote/hold/rollback |
+| POST | `/tickets/{id}/rollback/check` | Check if auto-rollback should trigger |
+| POST | `/projects/{id}/deploy/{env}` | SSH deploy to pre or prod |
+
+### Agents & Trust
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/agents` | Register agent |
+| GET | `/roles` | List available roles |
+| GET | `/roles/{id}/exam` | Get exam questions |
+| POST | `/roles/{id}/exam` | Submit exam answers |
+| POST | `/certifications/{agent}/{role}/grade` | Grade exam |
+
+### Governance
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/tickets/{id}/dora` | DORA metrics for a ticket |
+| POST | `/tickets/{id}/check-deps` | Dependency pinning + CVE scan |
+| POST | `/tickets/{id}/check-owners` | File-level ownership validation |
+| GET | `/status` | System health check |
+
+## Environment Configuration
+
+Each project has 3 environments:
+
+| Environment | When Used | Purpose |
+|-------------|-----------|---------|
+| **ci** | `implementation` / `rework` phase | SSH → clone → install → test → lint |
+| **pre** | `monitoring` phase (canary) | SSH → deploy → health check |
+| **prod** | Canary reaches 100% | SSH → deploy → health check |
+
+### EnvConfig Fields
+
+| Field | CI | Pre/Prod | Description |
+|-------|-----|---------|-------------|
+| `ssh_host` | ✅ | ✅ | IP or hostname |
+| `ssh_user` | ✅ | ✅ | SSH user |
+| `ssh_port` | ✅ | ✅ | Default: 22 |
+| `ssh_key_path` | ✅ | ✅ | Path to SSH key on Aegis server |
+| `work_dir` | ✅ | | Remote directory for git clone |
+| `install_command` | ✅ | | e.g. `pip install -r requirements.txt` |
+| `test_command` | ✅ | | e.g. `pytest tests/ -v` |
+| `lint_command` | ✅ | | e.g. `ruff check .` |
+| `deploy_command` | | ✅ | e.g. `cd /opt/app && git pull && systemctl restart app` |
+| `health_check_url` | | ✅ | e.g. `http://localhost:8000/status` |
+| `timeout_seconds` | ✅ | ✅ | Max execution time |
+
+## Architecture
+
+```
+You (人类)
   │
+  │  创建项目 / 配置环境 / 审批关键决策
   ▼
-ready ─── Coder claim ──→ preflight ──→ preflight_review
-                                              │
-                                     Master advance
-                                              │
-                              ┌───────────────┴──────────────┐
-                              │ risk=high OR priority≥4?      │
-                              │ YES                NO         │
-                              ▼                    ▼
-                        design_review         implementation
-                              │                    │
-                        Reviewer submit            │
-                              │                    │
-                              ▼                    │
-                        implementation ◄───────────┘
-                              │
-                         Coder submit (repo_path)
-                              │
-                    ┌─────────┤ Aegis CI Runner ├─────────┐
-                    │  pytest  │  lint  │  kill_test  │  spec  │
-                    └─────────┤  任何 fail → 400      ├─────────┘
-                              │ 全部 pass
-                              ▼
-                         code_review ─── Reviewer claim (防自审)
-                              │
-                    ┌─────────┴─────────┐
-                    │ approve       reject │
-                    ▼                  ▼
-                   qa              rework (review_rounds++)
-                    │              ≥2 → 自动 post-mortem
-               QA submit
-                    │
-                    ▼
-               merge_ready ─── Master advance
-                    │
-                    ▼
-               deploy_prep ─── Deployer submit
-                    │
-                    ▼
-               monitoring (30 min) ─── Deployer submit (health_check + error_rate)
-                    │
-                    ▼
-                  done
-```
-
-## 11 层防线
-
-| # | 防线 | 防什么 | 执行者 |
-|---|------|--------|--------|
-| 1 | 认证考试 | 不合格 agent 上岗 | Aegis |
-| 2 | 防自审 | 自己 review 自己 | Aegis |
-| 3 | 防同源 | 同 provider 互审 | Aegis |
-| 4 | lint_purity | `_logic.py` 引入 I/O | Aegis subprocess |
-| 5 | pytest | 测试不通过 | Aegis subprocess |
-| 6 | kill_test | 假测试（删函数不变红） | Aegis subprocess |
-| 7 | spec_coverage | 测试不覆盖 Master 的 spec | Aegis subprocess |
-| 8 | Design Review | 方案方向性错误 | Reviewer |
-| 9 | Code Review | 代码质量 / 架构合理性 | Reviewer |
-| 10 | Monitoring | 线上健康 | Deployer |
-| 11 | Post-mortem | 同类错误反复出现 | Aegis 自动触发 |
-
-所有防线均不可绕过（no override interface）。
-
-## 信任机制
-
-```python
-# 成功提交：+0.02 × (priority / 5)
-# priority 1 → +0.004（防刷分）, priority 5 → +0.02
-
-# 被 reject：-0.03 × (priority / 5)
-# 假测试被发现：-0.10 (test_quality)
-
-# 刷 100 个 priority=1 的票 = 做 20 个正常票的 trust
-```
-
-**Domain Trust**（技能匹配）：
-
-```json
-{"python": 0.85, "typescript": 0.42, "infra": 0.60}
-```
-
-新 domain 默认 0.50，低于 0.30 时 Aegis 拒绝 claim。
-
-**Post-Mortem 自动触发**（reject ≥ 2 次）：
-
-```
-假测试 pattern     → action: 更新考试题
-架构问题 pattern   → action: 强制 design_review
-范围蔓延 pattern   → action: 要求 scope 审批
-可测性违规 pattern → action: 更新 lint 规则
-```
-
-## DORA 指标
-
-```
-GET /metrics/dora?window_days=30
-```
-
-| 等级 | 部署频率 | 前置时间 | 失败率 | 恢复时间 |
-|------|---------|---------|--------|---------|
-| 🏆 Elite | 每天多次 | < 1 天 | 0-15% | < 1 小时 |
-| ✅ High | 每天~每周 | 1天~1周 | 16-30% | < 1 天 |
-
-## API 端点
-
-### 认证体系
-
-| 方法 | 端点 | 用途 |
-|------|------|------|
-| GET | `/roles` | 查看所有角色 |
-| GET/POST | `/roles/{role}/exam` | 查看考题 / 提交答案 |
-| POST | `/certifications/{agent}/{role}/grade` | 阅卷 |
-
-### 工单生命周期
-
-| 方法 | 端点 | 用途 |
-|------|------|------|
-| GET | `/tickets` | 浏览工单 |
-| GET | `/tickets/{id}` | 工单详情 + evidence + comments |
-| POST | `/tickets` | 创建工单（Master） |
-| POST | `/tickets/{id}/claim` | 认领（需认证） |
-| POST | `/tickets/{id}/submit` | 提交（repo_path = Aegis 自动验证） |
-| POST | `/tickets/{id}/reject` | 驳回（自动触发 post-mortem） |
-| POST | `/tickets/{id}/advance` | 推进阶段（仅 Master） |
-
-### 度量与监控
-
-| 方法 | 端点 | 用途 |
-|------|------|------|
-| GET | `/metrics/dora` | DORA 四项指标 |
-| GET | `/post-mortems` | 查看所有 post-mortem |
-| GET | `/post-mortems/{ticket_id}` | 分析指定 ticket |
-| GET | `/attention` | 需要关注的事项 |
-| GET | `/status` | 系统状态总览 |
-| GET | `/events` | 事件日志 |
-| GET | `/inbox/{agent_id}` | Agent 收件箱 |
-
-## 架构原则
-
-| 原则 | 实现 |
-|------|------|
-| 机械检查自动化 | Aegis CI Runner (pytest/lint/kill_test/spec) |
-| 语义判断留给人 | Reviewer 审架构 / QA 验行为 |
-| 不可覆盖的底线 | 没有 override 接口 |
-| 信任要赢得 | 考试 → 做票 → trust 缓慢上升 |
-| 作弊有代价 | 假测试 -0.10 / reject -0.03 |
-| WHAT 和 HOW 分离 | Master 定 spec / Coder 写实现 |
-| 三权分立 | 写的人不审 / 审的人不放行 / 系统不可跳过 |
-| 从失败中学习 | Post-mortem → knowledge → 考试题 |
-| 度量驱动改进 | DORA 指标实时可查 |
-| 技能匹配 | Domain trust 按领域积累 |
-
-## Agent ID 命名规范
-
-```
-{tool}-{model}
-  antigravity-gemini    ← Antigravity + Gemini
-  cursor-claude         ← Cursor + Claude
-  human-operator        ← 人类
-```
-
-Provider 从后半部分提取，用于防自审判断。
-
-## 项目结构
-
-```
-aegis/
-├── server/
-│   ├── main.py           # FastAPI 路由层（glue）
-│   ├── logic.py           # 纯业务逻辑（零 I/O，100% 单测）
-│   ├── ci_runner.py       # CI Runner — Aegis 自己执行验证
-│   ├── models.py          # Pydantic 模型
-│   └── db.py              # SQLite schema + 配置常量
-├── tests/
-│   ├── test_logic.py      # 74 unit tests (zero mock, <0.3s)
-│   └── e2e_lifecycle.py   # 全流程 E2E 测试
-├── docs/
-│   ├── workflow.md        # 工作流手册
-│   └── agent-prompts.md   # Agent system prompt 模板
-├── data/
-│   └── aegis.db           # SQLite 数据库（自动创建）
-└── README.md
+┌──────────────────────────────────────────────┐
+│                   Aegis                       │
+│                                              │
+│  Projects ─── Tickets ─── Agents ─── Trust   │
+│      │            │           │               │
+│  Environments  CI Runner    Certs             │
+│  (ci/pre/prod)  (SSH)     (Exams)            │
+│      │            │                          │
+│  Auto-Deploy   Canary    Rollback            │
+└──────────────────────────────────────────────┘
+  │          │          │
+  ▼          ▼          ▼
+ECS-CI    ECS-Pre    ECS-Prod
+(test)    (canary)   (live)
 ```
 
 ## License
 
 MIT
+""", "Description": "Complete README with quick start, API reference, environment setup, and architecture diagram"

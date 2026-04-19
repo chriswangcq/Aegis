@@ -210,12 +210,16 @@ def get_ticket(tid: str):
 def create_project(body: ProjectCreate):
     now = now_ms()
     envs = body.environments.model_dump()
-    db().execute(
-        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,environments_json,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (body.id, body.name, body.description, body.repo_url,
-         json.dumps(body.tech_stack), json.dumps(body.conventions),
-         json.dumps(envs),
-         body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
+    import sqlite3
+    try:
+        db().execute(
+            "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,environments_json,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (body.id, body.name, body.description, body.repo_url,
+             json.dumps(body.tech_stack), json.dumps(body.conventions),
+             json.dumps(envs),
+             body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"Project '{body.id}' already exists")
     log_event(db(), "project_created", body.id, body.master_id)
     db().commit()
     # Auto-provision: API keys
@@ -255,6 +259,32 @@ def get_project(pid: str):
             "mttr_ms": metrics.mttr_ms,
         }
     return r
+
+@app.patch("/projects/{pid}")
+def update_project(pid: str, body: dict):
+    """Update project settings (environments, conventions, etc.)."""
+    p = db().execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    if not p: raise HTTPException(404)
+    now = now_ms()
+    allowed = {"environments", "conventions", "metrics_url", "webhook_url",
+               "tech_stack", "default_domain", "description", "master_id"}
+    updates = []
+    params = []
+    for key, val in body.items():
+        if key not in allowed:
+            raise HTTPException(400, f"Cannot update '{key}'")
+        col = "environments_json" if key == "environments" else key
+        if isinstance(val, (dict, list)):
+            val = json.dumps(val)
+        updates.append(f"{col}=?")
+        params.append(val)
+    if not updates:
+        raise HTTPException(400, "No valid fields to update")
+    params.extend([now, pid])
+    db().execute(f"UPDATE projects SET {','.join(updates)},updated_at=? WHERE id=?", params)
+    log_event(db(), "project_updated", pid, "", "", json.dumps(list(body.keys())))
+    db().commit()
+    return {"id": pid, "updated": list(body.keys())}
 
 # ── Tickets ──────────────────────────────────────────────────
 
@@ -509,6 +539,12 @@ def advance_ticket(tid: str, body: TicketAdvance):
     log_event(db(), "advanced", tid, old_value=old, new_value=body.target_phase); db().commit()
     r = {"ticket_id": tid, "phase": body.target_phase}
     if unblocked: r["unblocked"] = unblocked
+
+    # Auto-deploy to pre when entering monitoring (canary start)
+    if body.target_phase == "monitoring" and t["project_id"]:
+        deploy_result = _auto_deploy(t["project_id"], "pre")
+        r["deploy"] = deploy_result
+
     return r
 
 @app.post("/tickets/{tid}/release")
@@ -789,13 +825,19 @@ def canary_health_check(tid: str, body: MetricsReport):
         next_stage = promote.data["to"]
         db().execute("UPDATE tickets SET canary_stage=?,updated_at=? WHERE id=?", (next_stage, now, tid))
         log_event(db(), "canary_promoted", tid, "system", str(current_stage), str(next_stage))
+
+        # Auto-deploy to prod when canary reaches 100%
+        deploy_result = None
         if next_stage >= 100:
-            # Full rollout → advance to done
             db().execute("UPDATE tickets SET phase='done',canary_stage=100,updated_at=? WHERE id=?", (now, tid))
             log_event(db(), "canary_complete", tid, "system", "monitoring", "done")
+            # Auto-deploy to prod
+            if t["project_id"]:
+                deploy_result = _auto_deploy(t["project_id"], "prod")
+
         db().commit()
         return {"action": "promote", "from": current_stage, "to": next_stage,
-                "health": "ok"}
+                "health": "ok", "deploy": deploy_result}
     elif promote.ok and promote.data.get("action") == "complete":
         db().commit()
         return {"action": "complete", "stage": 100, "health": "ok"}
@@ -882,6 +924,43 @@ def _send_webhook(url: str, alert: logic.AlertPayload):
         urllib.request.urlopen(req, timeout=5)
     except Exception as e:
         logger.warning(f"Webhook failed: {url} → {e}")
+
+
+def _auto_deploy(project_id: str, env: str) -> dict | None:
+    """Auto-deploy to pre or prod. Called by canary lifecycle.
+
+    Returns deploy result dict or None if env not configured.
+    """
+    proj = db().execute("SELECT environments_json FROM projects WHERE id=?", (project_id,)).fetchone()
+    if not proj: return None
+
+    envs = json.loads(proj["environments_json"] or "{}")
+    env_cfg = envs.get(env, {})
+    if not env_cfg.get("ssh_host") or not env_cfg.get("deploy_command"):
+        logger.info(f"Auto-deploy to {env} skipped — not configured for {project_id}")
+        return {"status": "skipped", "reason": f"{env} not configured"}
+
+    from . import ci_runner
+    code, output = ci_runner._ssh_run(
+        env_cfg["ssh_host"], env_cfg.get("ssh_user", "root"),
+        env_cfg.get("ssh_port", 22), env_cfg.get("ssh_key_path", "~/.ssh/id_rsa"),
+        env_cfg["deploy_command"],
+        timeout=env_cfg.get("timeout_seconds", 300))
+
+    log_event(db(), "auto_deployed" if code == 0 else "auto_deploy_failed",
+              project_id, "system", "", env)
+
+    # Health check
+    health_ok = True
+    if code == 0 and env_cfg.get("health_check_url"):
+        h_code, _ = ci_runner._ssh_run(
+            env_cfg["ssh_host"], env_cfg.get("ssh_user", "root"),
+            env_cfg.get("ssh_port", 22), env_cfg.get("ssh_key_path", "~/.ssh/id_rsa"),
+            f"curl -sf {env_cfg['health_check_url']} || exit 1", timeout=30)
+        health_ok = h_code == 0
+
+    return {"status": "ok" if code == 0 and health_ok else "failed",
+            "env": env, "exit_code": code}
 
 
 def main():
