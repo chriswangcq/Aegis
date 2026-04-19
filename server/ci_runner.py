@@ -1,12 +1,13 @@
-"""CI Runner — Command Center executes verification itself.
+"""CI Runner — Aegis executes verification itself.
 
-The agent submits a commit_sha. CC checks out the code and runs:
-1. lint_purity: python scripts/lint_logic_purity.py .
-2. pytest: python -m pytest tests/ -v --tb=short
-3. kill_test: for each _logic.py function, delete it, rerun tests, check failure
-4. test_spec_coverage: verify test names match Master-defined test_specs
+Flow:
+  1. Agent submits branch name (or commit_sha)
+  2. Aegis does: git clone repo_url → git checkout branch
+  3. Run: lint / pytest / kill_test / spec_coverage
+  4. All results written as system evidence — agent cannot tamper
+  5. Temporary clone is deleted after verification
 
-All results are written as system evidence — agent cannot tamper.
+All interaction is through git — no dependency on agent's local environment.
 """
 
 import subprocess
@@ -23,6 +24,41 @@ class CIResult:
     passed: bool
     output: str          # raw output
     detail: str = ""     # human-readable summary
+
+
+def checkout_repo(repo_url: str, branch: str = "main",
+                  commit_sha: str = "") -> tuple[str, CIResult | None]:
+    """Clone a repo from URL and checkout specific branch/commit.
+
+    Returns (work_dir, error_result).
+    If error_result is not None, checkout failed.
+    Caller must clean up work_dir when done.
+    """
+    work_dir = tempfile.mkdtemp(prefix="aegis_ci_")
+
+    # Clone
+    code, output = _run(
+        ["git", "clone", "--depth", "50", repo_url, work_dir],
+        cwd=work_dir, timeout=120
+    )
+    if code != 0:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return "", CIResult("git_clone", False, output,
+                            f"Failed to clone {repo_url}")
+
+    # Checkout branch or commit
+    ref = commit_sha or branch
+    if ref and ref != "main":
+        code, output = _run(
+            ["git", "checkout", ref],
+            cwd=work_dir, timeout=30
+        )
+        if code != 0:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return "", CIResult("git_checkout", False, output,
+                                f"Failed to checkout {ref}")
+
+    return work_dir, None
 
 
 def _run(cmd: list[str], cwd: str, timeout: int = 60) -> tuple[int, str]:
@@ -219,7 +255,7 @@ def run_spec_coverage(repo_path: str, test_specs: list[dict]) -> CIResult:
 
 def run_all_gates(repo_path: str, test_specs: list[dict] | None = None,
                   checklist: list[dict] | None = None) -> list[CIResult]:
-    """Run all CI gates on a repo. Returns list of CIResults."""
+    """Run all CI gates on a local repo path. Returns list of CIResults."""
     results = []
 
     # Always run pytest
@@ -248,3 +284,34 @@ def run_all_gates(repo_path: str, test_specs: list[dict] | None = None,
         results.append(run_spec_coverage(repo_path, test_specs))
 
     return results
+
+
+def run_all_gates_from_git(repo_url: str, branch: str = "main",
+                           commit_sha: str = "",
+                           test_specs: list[dict] | None = None,
+                           checklist: list[dict] | None = None) -> list[CIResult]:
+    """Full git-based CI: clone → checkout → run gates → cleanup.
+
+    This is the production flow where Aegis is fully independent
+    of the agent's local environment.
+
+    Agent only needs to push to git and submit the branch name.
+    """
+    # Step 1: Clone and checkout
+    work_dir, error = checkout_repo(repo_url, branch, commit_sha)
+    if error:
+        return [error]
+
+    try:
+        # Step 2: Run all gates on the cloned repo
+        results = run_all_gates(work_dir, test_specs, checklist)
+
+        # Prepend git info
+        git_info = CIResult(
+            "git_checkout", True, "",
+            f"Cloned {repo_url} @ {commit_sha or branch}")
+        return [git_info] + results
+    finally:
+        # Step 3: Always cleanup
+        shutil.rmtree(work_dir, ignore_errors=True)
+

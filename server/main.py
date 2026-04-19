@@ -348,55 +348,76 @@ def submit_ticket(tid: str, body: TicketSubmit):
     ci_results = []
     verification_mode = "agent_reported"  # default: trust agent evidence
 
-    # ── System: CC-executed verification (Option B) ──
-    # Resolve repo_path: agent-specified > project default
-    repo_path = body.repo_path
-    if not repo_path and t["project_id"]:
-        proj = db().execute("SELECT repo_path FROM projects WHERE id=?", (t["project_id"],)).fetchone()
-        if proj and proj["repo_path"]:
-            repo_path = proj["repo_path"]
-
-    if repo_path and phase in ("implementation", "rework"):
-        import os
-        if not os.path.isdir(repo_path):
-            raise HTTPException(400, f"repo_path '{repo_path}' does not exist")
-
+    # ── System: Aegis-executed verification ──
+    if phase in ("implementation", "rework"):
         from . import ci_runner
-        ci_results = ci_runner.run_all_gates(
-            repo_path, test_specs=test_specs, checklist=checklist
-        )
-        verification_mode = "system_executed"
 
-        failed = [r for r in ci_results if not r.passed]
-        if failed:
-            details = [{"gate": r.gate, "detail": r.detail, "output": r.output[:500]} for r in failed]
-            raise HTTPException(400, {
-                "message": f"{len(failed)} CI gate(s) failed (executed by Command Center)",
-                "failed_gates": details,
-                "verification_mode": "system_executed",
-                "hint": "Command Center ran these checks itself — results cannot be faked."
-            })
-    elif phase in ("implementation", "rework"):
-        # Fallback: agent-reported evidence — validate with logic gates
-        ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
-        ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
-        if not ev_check.ok:
-            raise HTTPException(400, ev_check.error)
+        # Priority 1: Git-based (production mode — fully independent)
+        repo_url = ""
+        proj = None
+        if t["project_id"]:
+            proj = db().execute("SELECT repo_url, repo_path FROM projects WHERE id=?",
+                                (t["project_id"],)).fetchone()
+            if proj:
+                repo_url = proj["repo_url"] or ""
 
-        gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
-        failed_gates = [g for g in gate_verdicts if not g.passed]
-        if failed_gates:
-            details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
-            raise HTTPException(400, {
-                "message": f"{len(failed_gates)} automated gate(s) failed",
-                "failed_gates": details,
-                "verification_mode": "agent_reported",
-                "hint": "Provide repo_path for system-executed verification (stronger guarantee)."
-            })
-        # Record agent-reported gates as evidence
-        for g in gate_verdicts:
-            db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
-                         (tid, phase, "system", "gate_agent_reported", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
+        if (body.branch or body.commit_sha) and repo_url:
+            # Git mode: clone from URL, checkout branch/commit
+            ci_results = ci_runner.run_all_gates_from_git(
+                repo_url, branch=body.branch or "main",
+                commit_sha=body.commit_sha,
+                test_specs=test_specs, checklist=checklist
+            )
+            verification_mode = "system_executed_git"
+
+        # Priority 2: Local path (dev mode)
+        elif body.repo_path or (proj and proj["repo_path"]):
+            import os
+            repo_path = body.repo_path or proj["repo_path"]
+            if not os.path.isdir(repo_path):
+                raise HTTPException(400, f"repo_path '{repo_path}' does not exist")
+            ci_results = ci_runner.run_all_gates(
+                repo_path, test_specs=test_specs, checklist=checklist
+            )
+            verification_mode = "system_executed_local"
+
+        # Priority 3: Agent-reported (legacy fallback)
+        else:
+            ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
+            ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
+            if not ev_check.ok:
+                raise HTTPException(400, ev_check.error)
+            ci_results = []
+
+        # Check CI results
+        if ci_results:
+            failed = [r for r in ci_results if not r.passed]
+            if failed:
+                details = [{"gate": r.gate, "detail": r.detail, "output": r.output[:500]} for r in failed]
+                raise HTTPException(400, {
+                    "message": f"{len(failed)} CI gate(s) failed (executed by Aegis)",
+                    "failed_gates": details,
+                    "verification_mode": verification_mode,
+                    "hint": "Aegis ran these checks itself — results cannot be faked."
+                })
+
+        # Agent-reported mode: run logic gates on submitted evidence
+        if verification_mode == "agent_reported":
+            ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
+            gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
+            failed_gates = [g for g in gate_verdicts if not g.passed]
+            if failed_gates:
+                details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
+                raise HTTPException(400, {
+                    "message": f"{len(failed_gates)} automated gate(s) failed",
+                    "failed_gates": details,
+                    "verification_mode": "agent_reported",
+                    "hint": "Submit branch name for system-executed verification (stronger guarantee)."
+                })
+            # Record agent-reported gates as evidence
+            for g in gate_verdicts:
+                db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
+                             (tid, phase, "system", "gate_agent_reported", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
     else:
         # Non-impl phases: validate evidence normally
         ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]

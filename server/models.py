@@ -47,8 +47,9 @@ class TicketClaim(BaseModel):
 
 class TicketSubmit(BaseModel):
     agent_id: str
-    commit_sha: str = ""        # CC will checkout and verify itself
-    repo_path: str = ""         # path to repo root (for local execution)
+    branch: str = ""            # primary: agent pushes to git, tells Aegis the branch
+    commit_sha: str = ""        # optional: specific commit to verify
+    repo_path: str = ""         # fallback: local path (for dev mode)
     evidence: list[EvidenceItem] = Field(default_factory=list)  # kept for backward compat
 
 
