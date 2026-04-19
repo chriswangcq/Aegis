@@ -21,14 +21,16 @@ def _pj(d):
             except: pass
     return d
 
-def _trust(agent_id, role_id, ticket_id, dim, delta, reason):
+def _trust(agent_id, role_id, ticket_id, dim, delta, reason, priority=3):
+    """Record trust event with priority-weighted delta."""
+    weighted_delta = logic.weight_by_priority(delta, priority)
     now = now_ms()
     db().execute("INSERT INTO trust_events (agent_id,role_id,ticket_id,dimension,delta,reason,created_at) VALUES(?,?,?,?,?,?,?)",
-                 (agent_id, role_id, ticket_id, dim, delta, reason, now))
+                 (agent_id, role_id, ticket_id, dim, weighted_delta, f"{reason} (p{priority})", now))
     cert = db().execute("SELECT trust_json FROM certifications WHERE agent_id=? AND role_id=?", (agent_id, role_id)).fetchone()
     if cert:
         t = json.loads(cert["trust_json"]) if cert["trust_json"] else {}
-        t[dim] = max(0.0, min(1.0, t.get(dim, 0.5) + delta))
+        t[dim] = max(0.0, min(1.0, t.get(dim, 0.5) + weighted_delta))
         db().execute("UPDATE certifications SET trust_json=?, updated_at=? WHERE agent_id=? AND role_id=?",
                      (json.dumps(t), now, agent_id, role_id))
 
@@ -301,7 +303,8 @@ def submit_ticket(tid: str, body: TicketSubmit):
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,assigned_role=NULL,locked_at=NULL,updated_at=? WHERE id=?", (next_phase, now, tid))
     db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, body.agent_id))
     role = t["assigned_role"] or "coder"
-    _trust(body.agent_id, role, tid, "commit_discipline", +0.02, f"clean submit from {phase}")
+    priority = t["priority"] or 3
+    _trust(body.agent_id, role, tid, "commit_discipline", +0.02, f"clean submit from {phase}", priority=priority)
     db().execute("UPDATE certifications SET tasks_completed=tasks_completed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, body.agent_id, role))
     log_event(db(), "submitted", tid, body.agent_id, phase, next_phase); db().commit()
     passed_gates = [g.gate for g in gate_verdicts if g.passed]

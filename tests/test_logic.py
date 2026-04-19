@@ -134,28 +134,37 @@ def test_wrong_answer_count():
 
 def test_trust_increment():
     old = {"code_quality": 0.5}
-    new = calculate_trust_delta(old, "code_quality", +0.1)
+    new = calculate_trust_delta(old, "code_quality", +0.1, priority=5)  # full weight
     assert abs(new["code_quality"] - 0.6) < 0.001
 
 def test_trust_clamps_to_one():
     old = {"code_quality": 0.95}
-    new = calculate_trust_delta(old, "code_quality", +0.1)
+    new = calculate_trust_delta(old, "code_quality", +0.1, priority=5)
     assert new["code_quality"] == 1.0
 
 def test_trust_clamps_to_zero():
     old = {"code_quality": 0.02}
-    new = calculate_trust_delta(old, "code_quality", -0.1)
+    new = calculate_trust_delta(old, "code_quality", -0.1, priority=5)
     assert new["code_quality"] == 0.0
 
 def test_trust_new_dimension():
     old = {}
-    new = calculate_trust_delta(old, "test_quality", +0.1)
+    new = calculate_trust_delta(old, "test_quality", +0.1, priority=5)
     assert abs(new["test_quality"] - 0.6) < 0.001  # default 0.5 + 0.1
 
 def test_trust_immutable():
     old = {"x": 0.5}
-    new = calculate_trust_delta(old, "x", +0.1)
+    new = calculate_trust_delta(old, "x", +0.1, priority=5)
     assert old["x"] == 0.5  # original not mutated
+
+def test_trust_farming_prevention():
+    """Vuln 6: priority-1 trivial tickets should give minimal trust"""
+    from server.logic import weight_by_priority
+    trivial = weight_by_priority(0.02, priority=1)
+    critical = weight_by_priority(0.02, priority=5)
+    assert abs(trivial - 0.004) < 0.001   # 0.02 × 0.2
+    assert abs(critical - 0.02) < 0.001   # 0.02 × 1.0
+    assert critical / trivial == 5.0       # 5x difference
 
 # ── analyze_rejection_trust ──────────────────────────────────
 

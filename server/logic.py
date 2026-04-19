@@ -144,11 +144,23 @@ def grade_exam(answers: list[str], exam_questions: list[dict],
 
 # ── Trust Calculation ────────────────────────────────────────
 
-def calculate_trust_delta(trust: dict, dimension: str, delta: float) -> dict:
-    """Apply a trust delta and clamp to [0, 1]. Returns new trust dict."""
+def weight_by_priority(base_delta: float, priority: int) -> float:
+    """Scale trust delta by ticket priority (1-5). Prevents farming trust with trivial tickets.
+
+    Priority 1 (trivial): delta × 0.2
+    Priority 3 (normal):  delta × 0.6
+    Priority 5 (critical): delta × 1.0
+    """
+    return base_delta * max(0.2, min(1.0, priority / 5))
+
+
+def calculate_trust_delta(trust: dict, dimension: str, delta: float,
+                          priority: int = 3) -> dict:
+    """Apply a trust delta (weighted by priority) and clamp to [0, 1]. Returns new trust dict."""
+    weighted = weight_by_priority(delta, priority)
     new_trust = dict(trust)
     old = new_trust.get(dimension, 0.5)
-    new_trust[dimension] = max(0.0, min(1.0, old + delta))
+    new_trust[dimension] = max(0.0, min(1.0, old + weighted))
     return new_trust
 
 
