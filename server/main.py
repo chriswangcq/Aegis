@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 import uvicorn
 from .db import get_db, init_schema, seed_roles, now_ms, log_event, PHASE_ROLE, SUBMIT_NEXT, VALID_PHASES
 from .models import *
+from . import logic
 
 logger = logging.getLogger("command-center")
 _conn = None
@@ -214,55 +215,53 @@ def create_ticket(body: TicketCreate):
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
     now = now_ms()
+    # ── I/O: fetch data ──
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
-    if t["blocked_by"]: raise HTTPException(409, f"Blocked by {t['blocked_by']}")
-    phase = t["phase"]
-    expired = t["locked_at"] and t["lock_ttl_ms"] and (now - t["locked_at"] > t["lock_ttl_ms"])
-    if phase not in PHASE_ROLE and not expired:
-        raise HTTPException(409, f"Phase '{phase}' not claimable")
-    required_role = PHASE_ROLE.get(phase, "coder")
-    # CHECK CERTIFICATION (and expiry)
-    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=? AND status='passed'",
+    required_role = PHASE_ROLE.get(t["phase"], "coder")
+    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=?",
                         (body.agent_id, required_role)).fetchone()
-    if not cert:
-        raise HTTPException(403, f"Agent '{body.agent_id}' not certified as '{required_role}'. Take exam: GET /roles/{required_role}/exam")
-    if cert["expires_at"] and cert["expires_at"] < now:
-        db().execute("UPDATE certifications SET status='expired', updated_at=? WHERE agent_id=? AND role_id=?",
-                     (now, body.agent_id, required_role))
-        db().commit()
-        raise HTTPException(403, f"Certification expired. Recertify: GET /roles/{required_role}/exam")
-    # ANTI-SELF-REVIEW: reviewer can't review a ticket they coded on
+
+    # ── Logic: pure function ──
+    ticket_dict = dict(t)
+    ticket_dict["scope_json"] = json.loads(t["scope_json"]) if t["scope_json"] else {}
+    result = logic.can_claim(ticket_dict, body.agent_id, dict(cert) if cert else None, now, PHASE_ROLE)
+    if not result.ok:
+        # Side effect: expire certification if that was the failure reason
+        if cert and cert["expires_at"] and cert["expires_at"] < now:
+            db().execute("UPDATE certifications SET status='expired', updated_at=? WHERE agent_id=? AND role_id=?",
+                         (now, body.agent_id, required_role))
+            db().commit()
+        raise HTTPException(403 if "certified" in result.error or "expired" in result.error else 409, result.error)
+
+    # ── Logic: anti-self-review ──
     if required_role == "reviewer":
-        prev_work = db().execute(
-            "SELECT agent_id FROM evidence WHERE ticket_id=? AND agent_id=?", (tid, body.agent_id)).fetchone()
-        if prev_work:
-            raise HTTPException(403, "Cannot review a ticket you worked on (anti-self-review)")
-        # Also check same provider
-        coder_agent = db().execute(
-            "SELECT a.provider FROM agents a JOIN evidence e ON a.id=e.agent_id WHERE e.ticket_id=? LIMIT 1", (tid,)).fetchone()
+        coder_ev = db().execute(
+            "SELECT e.agent_id, a.provider FROM evidence e JOIN agents a ON a.id=e.agent_id WHERE e.ticket_id=? LIMIT 1",
+            (tid,)).fetchone()
         my_provider = db().execute("SELECT provider FROM agents WHERE id=?", (body.agent_id,)).fetchone()
-        if coder_agent and my_provider and coder_agent["provider"] == my_provider["provider"]:
-            raise HTTPException(403, f"Same provider '{my_provider['provider']}' cannot both code and review (use a different model)")
-    # Determine next phase
-    scope = json.loads(t["scope_json"]) if t["scope_json"] else {}
-    skip_pf = scope.get("skip_preflight", False)
-    next_map = {"ready": "implementation" if skip_pf else "preflight",
-                "implementation": "implementation", "preflight_rework": "preflight_rework",
-                "rework": "rework", "preflight_review": "preflight_review",
-                "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
-    next_phase = next_map.get(phase, phase)
+        review_check = logic.can_review(
+            body.agent_id, my_provider["provider"] if my_provider else "",
+            coder_ev["agent_id"] if coder_ev else None,
+            coder_ev["provider"] if coder_ev else None)
+        if not review_check.ok:
+            raise HTTPException(403, review_check.error)
+
+    # ── I/O: write ──
+    next_phase = result.data["next_phase"]
+    role = result.data["role"]
     res = db().execute("UPDATE tickets SET phase=?,assigned_to=?,assigned_role=?,locked_at=?,updated_at=? WHERE id=? AND (phase=? OR (locked_at IS NOT NULL AND locked_at+lock_ttl_ms<?))",
-                       (next_phase, body.agent_id, required_role, now, now, tid, phase, now))
+                       (next_phase, body.agent_id, role, now, now, tid, t["phase"], now))
     if res.rowcount == 0: raise HTTPException(409, "Race: claimed by someone else")
     db().execute("UPDATE agents SET status='busy',current_ticket=?,current_role=?,last_active_at=?,updated_at=? WHERE id=?",
-                 (tid, required_role, now, now, body.agent_id))
-    log_event(db(), "claimed", tid, body.agent_id, phase, next_phase); db().commit()
-    return {"ticket_id": tid, "role": required_role, "phase": next_phase, "agent_id": body.agent_id}
+                 (tid, role, now, now, body.agent_id))
+    log_event(db(), "claimed", tid, body.agent_id, t["phase"], next_phase); db().commit()
+    return {"ticket_id": tid, "role": role, "phase": next_phase, "agent_id": body.agent_id}
 
 @app.post("/tickets/{tid}/submit")
 def submit_ticket(tid: str, body: TicketSubmit):
     now = now_ms()
+    # ── I/O: fetch ──
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
     if t["assigned_to"] != body.agent_id: raise HTTPException(403)
@@ -270,6 +269,14 @@ def submit_ticket(tid: str, body: TicketSubmit):
     if not next_phase: raise HTTPException(409, f"Cannot submit from '{phase}'")
     bl = db().execute("SELECT COUNT(*) as c FROM comments WHERE ticket_id=? AND comment_type='blocker' AND status='open'", (tid,)).fetchone()["c"]
     if bl > 0: raise HTTPException(409, f"{bl} unresolved blocker(s)")
+
+    # ── Logic: validate evidence ──
+    ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
+    ev_check = logic.validate_submit_evidence(phase, ev_dicts)
+    if not ev_check.ok:
+        raise HTTPException(400, ev_check.error)
+
+    # ── I/O: write ──
     for ev in body.evidence:
         db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
                      (tid, phase, body.agent_id, ev.evidence_type, ev.content, ev.verdict, now))
