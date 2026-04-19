@@ -200,8 +200,8 @@ def get_ticket(tid: str):
 def create_project(body: ProjectCreate):
     now = now_ms()
     db().execute(
-        "INSERT INTO projects (id,name,description,repo_url,repo_path,tech_stack,conventions,default_domain,master_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (body.id, body.name, body.description, body.repo_url, body.repo_path,
+        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,default_domain,master_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (body.id, body.name, body.description, body.repo_url,
          json.dumps(body.tech_stack), json.dumps(body.conventions),
          body.default_domain, body.master_id, now, now))
     log_event(db(), "project_created", body.id, body.master_id)
@@ -346,78 +346,34 @@ def submit_ticket(tid: str, body: TicketSubmit):
     except (IndexError, KeyError):
         test_specs = []
     ci_results = []
-    verification_mode = "agent_reported"  # default: trust agent evidence
 
-    # ── System: Aegis-executed verification ──
+    # ── Aegis CI: git-only verification ──
     if phase in ("implementation", "rework"):
+        if not t["project_id"]:
+            raise HTTPException(400, "Ticket must belong to a project")
+        proj = db().execute("SELECT repo_url FROM projects WHERE id=?",
+                            (t["project_id"],)).fetchone()
+        if not proj or not proj["repo_url"]:
+            raise HTTPException(400, "Project must have repo_url")
+        if not body.branch and not body.commit_sha:
+            raise HTTPException(400, "Must submit branch or commit_sha (git push first)")
+
         from . import ci_runner
+        ci_results = ci_runner.run_all_gates_from_git(
+            proj["repo_url"], branch=body.branch or "main",
+            commit_sha=body.commit_sha,
+            test_specs=test_specs, checklist=checklist
+        )
 
-        # Priority 1: Git-based (production mode — fully independent)
-        repo_url = ""
-        proj = None
-        if t["project_id"]:
-            proj = db().execute("SELECT repo_url, repo_path FROM projects WHERE id=?",
-                                (t["project_id"],)).fetchone()
-            if proj:
-                repo_url = proj["repo_url"] or ""
-
-        if (body.branch or body.commit_sha) and repo_url:
-            # Git mode: clone from URL, checkout branch/commit
-            ci_results = ci_runner.run_all_gates_from_git(
-                repo_url, branch=body.branch or "main",
-                commit_sha=body.commit_sha,
-                test_specs=test_specs, checklist=checklist
-            )
-            verification_mode = "system_executed_git"
-
-        # Priority 2: Local path (dev mode)
-        elif body.repo_path or (proj and proj["repo_path"]):
-            import os
-            repo_path = body.repo_path or proj["repo_path"]
-            if not os.path.isdir(repo_path):
-                raise HTTPException(400, f"repo_path '{repo_path}' does not exist")
-            ci_results = ci_runner.run_all_gates(
-                repo_path, test_specs=test_specs, checklist=checklist
-            )
-            verification_mode = "system_executed_local"
-
-        # Priority 3: Agent-reported (legacy fallback)
-        else:
-            ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
-            ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
-            if not ev_check.ok:
-                raise HTTPException(400, ev_check.error)
-            ci_results = []
-
-        # Check CI results
-        if ci_results:
-            failed = [r for r in ci_results if not r.passed]
-            if failed:
-                details = [{"gate": r.gate, "detail": r.detail, "output": r.output[:500]} for r in failed]
-                raise HTTPException(400, {
-                    "message": f"{len(failed)} CI gate(s) failed (executed by Aegis)",
-                    "failed_gates": details,
-                    "verification_mode": verification_mode,
-                    "hint": "Aegis ran these checks itself — results cannot be faked."
-                })
-
-        # Agent-reported mode: run logic gates on submitted evidence
-        if verification_mode == "agent_reported":
-            ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
-            gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
-            failed_gates = [g for g in gate_verdicts if not g.passed]
-            if failed_gates:
-                details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
-                raise HTTPException(400, {
-                    "message": f"{len(failed_gates)} automated gate(s) failed",
-                    "failed_gates": details,
-                    "verification_mode": "agent_reported",
-                    "hint": "Submit branch name for system-executed verification (stronger guarantee)."
-                })
-            # Record agent-reported gates as evidence
-            for g in gate_verdicts:
-                db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
-                             (tid, phase, "system", "gate_agent_reported", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
+        failed = [r for r in ci_results if not r.passed]
+        if failed:
+            details = [{"gate": r.gate, "detail": r.detail, "output": r.output[:500]} for r in failed]
+            raise HTTPException(400, {
+                "message": f"{len(failed)} CI gate(s) failed",
+                "failed_gates": details,
+                "verification_mode": "system_executed",
+                "hint": "Aegis cloned your branch and ran these checks — results cannot be faked."
+            })
     else:
         # Non-impl phases: validate evidence normally
         ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
@@ -449,8 +405,9 @@ def submit_ticket(tid: str, body: TicketSubmit):
     db().execute("UPDATE certifications SET tasks_completed=tasks_completed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, body.agent_id, role))
     log_event(db(), "submitted", tid, body.agent_id, phase, next_phase); db().commit()
     passed_gates = [r.gate for r in ci_results if r.passed]
+    vmode = "system_executed" if ci_results else "evidence"
     return {"ticket_id": tid, "previous_phase": phase, "new_phase": next_phase,
-            "verification_mode": verification_mode,
+            "verification_mode": vmode,
             "gates_passed": passed_gates}
 
 @app.post("/tickets/{tid}/reject")

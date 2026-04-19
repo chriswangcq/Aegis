@@ -10,8 +10,7 @@ class ProjectCreate(BaseModel):
     id: str                                    # e.g. "novaic-gateway"
     name: str                                  # display name
     description: str = ""
-    repo_url: str = ""                         # https://github.com/org/repo
-    repo_path: str = ""                        # local clone path for CI runner
+    repo_url: str                              # https://github.com/org/repo (required)
     tech_stack: list[str] = Field(default_factory=list)  # ["python","typescript"]
     conventions: dict = Field(default_factory=dict)      # coding standards
     default_domain: str = ""                   # default domain for tickets
@@ -47,10 +46,9 @@ class TicketClaim(BaseModel):
 
 class TicketSubmit(BaseModel):
     agent_id: str
-    branch: str = ""            # primary: agent pushes to git, tells Aegis the branch
-    commit_sha: str = ""        # optional: specific commit to verify
-    repo_path: str = ""         # fallback: local path (for dev mode)
-    evidence: list[EvidenceItem] = Field(default_factory=list)  # kept for backward compat
+    branch: str = ""            # git push → tell Aegis the branch
+    commit_sha: str = ""        # optional: pin to specific commit
+    evidence: list[EvidenceItem] = Field(default_factory=list)  # for non-impl phases (review, monitoring)
 
 
 class TicketAdvance(BaseModel):

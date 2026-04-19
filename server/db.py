@@ -76,8 +76,7 @@ def init_schema(conn: sqlite3.Connection):
         id             TEXT PRIMARY KEY,
         name           TEXT NOT NULL,
         description    TEXT DEFAULT '',
-        repo_url       TEXT DEFAULT '',              -- https://github.com/org/repo
-        repo_path      TEXT DEFAULT '',              -- local clone path for CI runner
+        repo_url       TEXT NOT NULL,                -- https://github.com/org/repo (唯一代码来源)
         tech_stack     TEXT DEFAULT '[]',            -- ["python","typescript"]
         conventions    TEXT DEFAULT '{}',            -- coding standards JSON
         default_domain TEXT DEFAULT '',              -- default domain for new tickets
