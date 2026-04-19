@@ -1,0 +1,18 @@
+services:
+  aegis:
+    build: .
+    ports:
+      - "9800:9800"
+    volumes:
+      - aegis-data:/app/data
+    environment:
+      - AEGIS_DB_PATH=/app/data/aegis.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9800/status')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  aegis-data:

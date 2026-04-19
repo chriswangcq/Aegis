@@ -1,4 +1,4 @@
-"""Command Center server v0.4 — role-based team with certification exams."""
+"""Aegis — AI-native engineering governance platform."""
 import json, logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -6,6 +6,7 @@ import uvicorn
 from .db import get_db, init_schema, seed_roles, now_ms, log_event, PHASE_ROLE, SUBMIT_NEXT, VALID_PHASES
 from .models import *
 from . import logic
+from . import provisioner
 
 logger = logging.getLogger("command-center")
 _conn = None
@@ -38,9 +39,18 @@ def _trust(agent_id, role_id, ticket_id, dim, delta, reason, priority=3):
 async def lifespan(app):
     global _conn
     _conn = get_db(); init_schema(_conn); seed_roles(_conn)
-    logger.info("Command Center v0.4 ready"); yield; _conn.close()
+    logger.info("Aegis v1.0 ready"); yield; _conn.close()
 
-app = FastAPI(title="NovAIC Command Center", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Aegis", description="AI-native engineering governance platform", version="1.0.0", lifespan=lifespan)
+
+@app.get("/status")
+def health():
+    """Health check for Docker / load balancer."""
+    projects = db().execute("SELECT COUNT(*) as c FROM projects").fetchone()["c"]
+    tickets = db().execute("SELECT COUNT(*) as c FROM tickets").fetchone()["c"]
+    agents = db().execute("SELECT COUNT(*) as c FROM agents").fetchone()["c"]
+    return {"status": "ok", "version": "1.0.0", "projects": projects,
+            "tickets": tickets, "agents": agents}
 
 # ── ROLES & CERTIFICATION ────────────────────────────────────
 
@@ -206,8 +216,13 @@ def create_project(body: ProjectCreate):
          body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
     log_event(db(), "project_created", body.id, body.master_id)
     db().commit()
+    # Auto-provision: API keys + CI environment
+    result = provisioner.provision_project(
+        body.id, body.master_id, body.tech_stack, db())
     return {"id": body.id, "name": body.name, "master_id": body.master_id,
-            "repo_url": body.repo_url}
+            "repo_url": body.repo_url,
+            "api_keys": result.api_keys,
+            "ci_image": result.ci_image}
 
 @app.get("/projects")
 def list_projects(status: str = "active"):

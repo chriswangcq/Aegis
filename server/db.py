@@ -60,7 +60,9 @@ def now_ms() -> int:
 
 
 def get_db(path: Path | None = None) -> sqlite3.Connection:
-    p = path or DEFAULT_DB
+    import os
+    env_path = os.environ.get("AEGIS_DB_PATH")
+    p = path or (Path(env_path) if env_path else DEFAULT_DB)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -248,6 +250,45 @@ def init_schema(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
     CREATE INDEX IF NOT EXISTS idx_event_log_ticket ON event_log(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_trust_events_agent ON trust_events(agent_id);
+
+    -- ── API Keys ─────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS api_keys (
+        id             TEXT PRIMARY KEY,
+        project_id     TEXT REFERENCES projects(id),
+        agent_id       TEXT DEFAULT '',
+        role           TEXT DEFAULT 'agent',
+        created_at     INTEGER,
+        revoked_at     INTEGER
+    );
+
+    -- ── Project Environments ─────────────────────────────
+    CREATE TABLE IF NOT EXISTS project_environments (
+        project_id     TEXT PRIMARY KEY REFERENCES projects(id),
+        ci_image       TEXT DEFAULT 'python:3.11-slim',
+        cpu_limit      TEXT DEFAULT '2',
+        memory_limit   TEXT DEFAULT '2Gi',
+        timeout_sec    INTEGER DEFAULT 300,
+        network_mode   TEXT DEFAULT 'none',
+        env_vars       TEXT DEFAULT '{}',
+        deploy_key_id  TEXT DEFAULT '',
+        created_at     INTEGER
+    );
+
+    -- ── CI Jobs ──────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS ci_jobs (
+        id             TEXT PRIMARY KEY,
+        ticket_id      TEXT REFERENCES tickets(id),
+        project_id     TEXT REFERENCES projects(id),
+        branch         TEXT,
+        status         TEXT DEFAULT 'queued',
+        worker_id      TEXT,
+        started_at     INTEGER,
+        finished_at    INTEGER,
+        results_json   TEXT DEFAULT '[]',
+        container_id   TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ci_jobs_status ON ci_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id);
     """)
     conn.commit()
 
