@@ -171,21 +171,30 @@ def analyze_rejection_trust(reason: str, blocker_comments: list[str]) -> list[tu
 
 # ── Evidence Validation ──────────────────────────────────────
 
-def validate_submit_evidence(phase: str, evidence: list[dict]) -> Result:
+def validate_submit_evidence(phase: str, evidence: list[dict],
+                              checklist: list[dict] | None = None) -> Result:
     """Check if evidence is sufficient for this phase.
 
     Rules:
-    - implementation phase: must include at least one 'stdout' or 'test' evidence
-    - preflight phase: must include 'preflight' evidence
-    - code_review phase: must include 'review' evidence
+    - implementation/rework: must include test evidence (stdout/test/test_result)
+    - preflight: must include analysis evidence
+    - code_review: must include review evidence
+    - If checklist has [unit] items: must include kill_test evidence
     """
     types = {e.get("evidence_type", "") for e in evidence}
 
-    if phase == "implementation" or phase == "rework":
+    if phase in ("implementation", "rework"):
         if not types & {"stdout", "test", "test_result"}:
             return Result(ok=False, error="Implementation submit requires test evidence (stdout/test/test_result)")
+        # Check if any checklist item tagged [unit] — require kill_test
+        if checklist:
+            unit_items = [c for c in checklist if "[unit]" in c.get("description", "")]
+            if unit_items and "kill_test" not in types:
+                return Result(ok=False,
+                    error="Checklist has [unit] items — must provide 'kill_test' evidence "
+                          "(delete the function, show the test fails)")
 
-    if phase == "preflight" or phase == "preflight_rework":
+    if phase in ("preflight", "preflight_rework"):
         if not types & {"preflight", "analysis", "plan"}:
             return Result(ok=False, error="Preflight submit requires analysis evidence (preflight/analysis/plan)")
 

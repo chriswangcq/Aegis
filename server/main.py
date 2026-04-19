@@ -272,7 +272,8 @@ def submit_ticket(tid: str, body: TicketSubmit):
 
     # ── Logic: validate evidence ──
     ev_dicts = [{"evidence_type": ev.evidence_type, "content": ev.content, "verdict": ev.verdict} for ev in body.evidence]
-    ev_check = logic.validate_submit_evidence(phase, ev_dicts)
+    checklist = json.loads(t["checklist_json"]) if t["checklist_json"] else []
+    ev_check = logic.validate_submit_evidence(phase, ev_dicts, checklist=checklist)
     if not ev_check.ok:
         raise HTTPException(400, ev_check.error)
 

@@ -205,6 +205,28 @@ def test_cr_with_review_ok():
     r = validate_submit_evidence("code_review", [{"evidence_type": "review"}])
     assert r.ok
 
+def test_unit_checklist_requires_kill_test():
+    checklist = [{"description": "提取 parse_send_payload [unit]"}]
+    r = validate_submit_evidence("implementation",
+        [{"evidence_type": "stdout"}],  # has test evidence but no kill_test
+        checklist=checklist)
+    assert not r.ok
+    assert "kill_test" in r.error
+
+def test_unit_checklist_with_kill_test_ok():
+    checklist = [{"description": "提取 parse_send_payload [unit]"}]
+    r = validate_submit_evidence("implementation",
+        [{"evidence_type": "stdout"}, {"evidence_type": "kill_test"}],
+        checklist=checklist)
+    assert r.ok
+
+def test_no_unit_checklist_no_kill_test_needed():
+    checklist = [{"description": "改 API 路由 [e2e]"}]
+    r = validate_submit_evidence("implementation",
+        [{"evidence_type": "stdout"}],
+        checklist=checklist)
+    assert r.ok
+
 
 if __name__ == "__main__":
     import pytest
