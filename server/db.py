@@ -20,7 +20,6 @@ VALID_PHASES = [
 PHASE_ROLE = {
     "ready":            "coder",
     "implementation":   "coder",
-    "self_test":        "coder",
     "preflight_rework": "coder",
     "rework":           "coder",
     "preflight_review": "reviewer",
@@ -32,10 +31,9 @@ PHASE_ROLE = {
 # Where submit advances to
 SUBMIT_NEXT = {
     "preflight":       "preflight_review",
-    "implementation":  "self_test",
-    "self_test":       "code_review",
+    "implementation":  "code_review",   # test evidence required at submit
     "preflight_rework":"preflight_review",
-    "rework":          "self_test",
+    "rework":          "code_review",    # rework goes straight to CR too
     "code_review":     "qa",
     "qa":              "merge_ready",
 }

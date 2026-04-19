@@ -203,10 +203,13 @@ def create_ticket(body: TicketCreate):
         row = db().execute("SELECT phase FROM tickets WHERE id=?", (dep,)).fetchone()
         if row and row["phase"] != "done": blocked_by = dep; break
     phase = "ready" if not blocked_by else "planning"
+    # Store skip_preflight in scope_json
+    if body.skip_preflight:
+        scope["skip_preflight"] = True
     db().execute("INSERT INTO tickets (id,title,description,phase,depends_on,blocked_by,scope_json,checklist_json,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (body.id, body.title, body.description, phase, json.dumps(body.depends_on), blocked_by, json.dumps(scope), json.dumps(cl), body.priority, body.risk_level, body.created_by, now, now))
     log_event(db(), "ticket_created", body.id, new_value=phase); db().commit()
-    return {"id": body.id, "phase": phase, "blocked_by": blocked_by}
+    return {"id": body.id, "phase": phase, "blocked_by": blocked_by, "skip_preflight": body.skip_preflight}
 
 @app.post("/tickets/{tid}/claim")
 def claim_ticket(tid: str, body: TicketClaim):
@@ -229,9 +232,25 @@ def claim_ticket(tid: str, body: TicketClaim):
                      (now, body.agent_id, required_role))
         db().commit()
         raise HTTPException(403, f"Certification expired. Recertify: GET /roles/{required_role}/exam")
-    next_map = {"ready": "preflight", "implementation": "implementation", "self_test": "self_test",
-                "preflight_rework": "preflight_rework", "rework": "rework",
-                "preflight_review": "preflight_review", "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
+    # ANTI-SELF-REVIEW: reviewer can't review a ticket they coded on
+    if required_role == "reviewer":
+        prev_work = db().execute(
+            "SELECT agent_id FROM evidence WHERE ticket_id=? AND agent_id=?", (tid, body.agent_id)).fetchone()
+        if prev_work:
+            raise HTTPException(403, "Cannot review a ticket you worked on (anti-self-review)")
+        # Also check same provider
+        coder_agent = db().execute(
+            "SELECT a.provider FROM agents a JOIN evidence e ON a.id=e.agent_id WHERE e.ticket_id=? LIMIT 1", (tid,)).fetchone()
+        my_provider = db().execute("SELECT provider FROM agents WHERE id=?", (body.agent_id,)).fetchone()
+        if coder_agent and my_provider and coder_agent["provider"] == my_provider["provider"]:
+            raise HTTPException(403, f"Same provider '{my_provider['provider']}' cannot both code and review (use a different model)")
+    # Determine next phase
+    scope = json.loads(t["scope_json"]) if t["scope_json"] else {}
+    skip_pf = scope.get("skip_preflight", False)
+    next_map = {"ready": "implementation" if skip_pf else "preflight",
+                "implementation": "implementation", "preflight_rework": "preflight_rework",
+                "rework": "rework", "preflight_review": "preflight_review",
+                "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
     next_phase = next_map.get(phase, phase)
     res = db().execute("UPDATE tickets SET phase=?,assigned_to=?,assigned_role=?,locked_at=?,updated_at=? WHERE id=? AND (phase=? OR (locked_at IS NOT NULL AND locked_at+lock_ttl_ms<?))",
                        (next_phase, body.agent_id, required_role, now, now, tid, phase, now))

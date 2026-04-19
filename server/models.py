@@ -20,6 +20,7 @@ class TicketCreate(BaseModel):
     scope_includes: list[str] = Field(default_factory=list)
     scope_excludes: list[str] = Field(default_factory=list)
     checklist: list[str] = Field(default_factory=list)
+    skip_preflight: bool = False  # simple tickets can go straight to implementation
     created_by: str = "master"
 
 
