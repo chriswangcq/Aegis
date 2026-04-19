@@ -92,12 +92,17 @@ def run_lint(repo_path: str) -> CIResult:
                     "lint clean" if passed else f"lint failed (exit {code})")
 
 
-def run_pytest(repo_path: str, timeout: int = 120) -> CIResult:
-    """Gate 2: Run pytest on the repo."""
-    code, output = _run(
-        ["python", "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
-        cwd=repo_path, timeout=timeout
-    )
+def run_pytest(repo_path: str, test_command: str = "", timeout: int = 120) -> CIResult:
+    """Gate 2: Run tests on the repo using project's configured command."""
+    if test_command:
+        # User-defined command: split and run
+        parts = test_command.split()
+        code, output = _run(parts, cwd=repo_path, timeout=timeout)
+    else:
+        code, output = _run(
+            ["python", "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
+            cwd=repo_path, timeout=timeout
+        )
     # Parse pytest output for pass/fail counts
     match = re.search(r"(\d+) passed", output)
     passed_count = int(match.group(1)) if match else 0
@@ -254,32 +259,53 @@ def run_spec_coverage(repo_path: str, test_specs: list[dict]) -> CIResult:
 
 
 def run_all_gates(repo_path: str, test_specs: list[dict] | None = None,
-                  checklist: list[dict] | None = None) -> list[CIResult]:
+                  checklist: list[dict] | None = None,
+                  ci_config: dict | None = None) -> list[CIResult]:
     """Run all CI gates on a local repo path. Returns list of CIResults."""
     results = []
+    cfg = ci_config or {}
+    timeout = cfg.get("timeout_seconds", 120)
 
-    # Always run pytest
-    results.append(run_pytest(repo_path))
+    # Step 0: Install dependencies if configured
+    install_cmd = cfg.get("install_command", "")
+    if install_cmd:
+        code, output = _run(install_cmd.split(), cwd=repo_path, timeout=120)
+        if code != 0:
+            results.append(CIResult("install", False, output,
+                                     f"Install failed: {install_cmd}"))
+            return results  # no point running tests if install fails
 
-    # Run lint if checklist mentions _logic.py or [unit]
-    need_lint = False
-    if checklist:
-        for c in checklist:
-            desc = c.get("description", "").lower()
-            if "_logic" in desc or "[unit]" in desc:
-                need_lint = True
-                break
-    if need_lint:
-        results.append(run_lint(repo_path))
+    # Gate 1: Run tests
+    test_cmd = cfg.get("test_command", "")
+    results.append(run_pytest(repo_path, test_command=test_cmd, timeout=timeout))
 
-    # Run kill_test if checklist has [unit] items
+    # Gate 2: Run lint if configured or if checklist mentions it
+    lint_cmd = cfg.get("lint_command", "")
+    if lint_cmd:
+        code, output = _run(lint_cmd.split(), cwd=repo_path, timeout=60)
+        passed = code == 0
+        results.append(CIResult("lint", passed, output,
+                                 "lint clean" if passed else f"lint failed: {lint_cmd}"))
+    else:
+        # Fallback: check for repo's own lint script
+        need_lint = False
+        if checklist:
+            for c in checklist:
+                desc = c.get("description", "").lower()
+                if "_logic" in desc or "[unit]" in desc:
+                    need_lint = True
+                    break
+        if need_lint:
+            results.append(run_lint(repo_path))
+
+    # Gate 3: Kill test if checklist has [unit] items
     need_kill = False
     if checklist:
         need_kill = any("[unit]" in c.get("description", "") for c in checklist)
     if need_kill:
         results.append(run_kill_test(repo_path))
 
-    # Run spec coverage if test_specs provided
+    # Gate 4: Spec coverage
     if test_specs:
         results.append(run_spec_coverage(repo_path, test_specs))
 
@@ -289,12 +315,11 @@ def run_all_gates(repo_path: str, test_specs: list[dict] | None = None,
 def run_all_gates_from_git(repo_url: str, branch: str = "main",
                            commit_sha: str = "",
                            test_specs: list[dict] | None = None,
-                           checklist: list[dict] | None = None) -> list[CIResult]:
+                           checklist: list[dict] | None = None,
+                           ci_config: dict | None = None) -> list[CIResult]:
     """Full git-based CI: clone → checkout → run gates → cleanup.
 
-    This is the production flow where Aegis is fully independent
-    of the agent's local environment.
-
+    Uses project's ci_config for install/test/lint commands.
     Agent only needs to push to git and submit the branch name.
     """
     # Step 1: Clone and checkout
@@ -303,8 +328,8 @@ def run_all_gates_from_git(repo_url: str, branch: str = "main",
         return [error]
 
     try:
-        # Step 2: Run all gates on the cloned repo
-        results = run_all_gates(work_dir, test_specs, checklist)
+        # Step 2: Run all gates
+        results = run_all_gates(work_dir, test_specs, checklist, ci_config)
 
         # Prepend git info
         git_info = CIResult(

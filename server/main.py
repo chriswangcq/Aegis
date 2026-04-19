@@ -209,20 +209,21 @@ def get_ticket(tid: str):
 @app.post("/projects")
 def create_project(body: ProjectCreate):
     now = now_ms()
+    ci_cfg = body.ci_config.model_dump()
     db().execute(
-        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,ci_config_json,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (body.id, body.name, body.description, body.repo_url,
          json.dumps(body.tech_stack), json.dumps(body.conventions),
+         json.dumps(ci_cfg),
          body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
     log_event(db(), "project_created", body.id, body.master_id)
     db().commit()
-    # Auto-provision: API keys + CI environment
-    result = provisioner.provision_project(
-        body.id, body.master_id, body.tech_stack, db())
+    # Auto-provision: API keys
+    result = provisioner.provision_project(body.id, body.master_id, db())
     return {"id": body.id, "name": body.name, "master_id": body.master_id,
             "repo_url": body.repo_url,
             "api_keys": result.api_keys,
-            "ci_image": result.ci_image}
+            "ci_config": ci_cfg}
 
 @app.get("/projects")
 def list_projects(status: str = "active"):
@@ -369,18 +370,20 @@ def submit_ticket(tid: str, body: TicketSubmit):
     if phase in ("implementation", "rework"):
         if not t["project_id"]:
             raise HTTPException(400, "Ticket must belong to a project")
-        proj = db().execute("SELECT repo_url FROM projects WHERE id=?",
+        proj = db().execute("SELECT repo_url, ci_config_json FROM projects WHERE id=?",
                             (t["project_id"],)).fetchone()
         if not proj or not proj["repo_url"]:
             raise HTTPException(400, "Project must have repo_url")
         if not body.branch and not body.commit_sha:
             raise HTTPException(400, "Must submit branch or commit_sha (git push first)")
 
+        ci_cfg = json.loads(proj["ci_config_json"] or "{}") if proj["ci_config_json"] else {}
         from . import ci_runner
         ci_results = ci_runner.run_all_gates_from_git(
             proj["repo_url"], branch=body.branch or "main",
             commit_sha=body.commit_sha,
-            test_specs=test_specs, checklist=checklist
+            test_specs=test_specs, checklist=checklist,
+            ci_config=ci_cfg
         )
 
         failed = [r for r in ci_results if not r.passed]

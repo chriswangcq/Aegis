@@ -80,12 +80,13 @@ def init_schema(conn: sqlite3.Connection):
         description    TEXT DEFAULT '',
         repo_url       TEXT NOT NULL,
         tech_stack     TEXT DEFAULT '[]',
-        conventions    TEXT DEFAULT '{}',            -- coding standards + owners_map
+        conventions    TEXT DEFAULT '{}',
+        ci_config_json TEXT DEFAULT '{}',            -- {install_command, test_command, lint_command, timeout_seconds}
         default_domain TEXT DEFAULT '',
         master_id      TEXT,
         status         TEXT DEFAULT 'active',
-        metrics_url    TEXT DEFAULT '',              -- prometheus /metrics endpoint
-        webhook_url    TEXT DEFAULT '',              -- alert webhook (slack/discord)
+        metrics_url    TEXT DEFAULT '',
+        webhook_url    TEXT DEFAULT '',
         created_at     INTEGER,
         updated_at     INTEGER
     );
@@ -259,19 +260,6 @@ def init_schema(conn: sqlite3.Connection):
         role           TEXT DEFAULT 'agent',
         created_at     INTEGER,
         revoked_at     INTEGER
-    );
-
-    -- ── Project Environments ─────────────────────────────
-    CREATE TABLE IF NOT EXISTS project_environments (
-        project_id     TEXT PRIMARY KEY REFERENCES projects(id),
-        ci_image       TEXT DEFAULT 'python:3.11-slim',
-        cpu_limit      TEXT DEFAULT '2',
-        memory_limit   TEXT DEFAULT '2Gi',
-        timeout_sec    INTEGER DEFAULT 300,
-        network_mode   TEXT DEFAULT 'none',
-        env_vars       TEXT DEFAULT '{}',
-        deploy_key_id  TEXT DEFAULT '',
-        created_at     INTEGER
     );
 
     -- ── CI Jobs ──────────────────────────────────────────

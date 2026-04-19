@@ -6,6 +6,13 @@ from pydantic import BaseModel, Field
 
 # ── Projects ─────────────────────────────────────────────────
 
+class CIConfig(BaseModel):
+    """User-defined CI commands for a project."""
+    install_command: str = "pip install -r requirements.txt"   # run before tests
+    test_command: str = "python -m pytest tests/ -v --tb=short"
+    lint_command: str = ""                                     # optional: "ruff check ."
+    timeout_seconds: int = 300                                 # max CI execution time
+
 class ProjectCreate(BaseModel):
     id: str                                    # e.g. "novaic-gateway"
     name: str                                  # display name
@@ -13,10 +20,11 @@ class ProjectCreate(BaseModel):
     repo_url: str                              # https://github.com/org/repo (required)
     tech_stack: list[str] = Field(default_factory=list)
     conventions: dict = Field(default_factory=dict)      # coding standards + owners_map
+    ci_config: CIConfig = Field(default_factory=CIConfig) # how to run CI
     default_domain: str = ""
     master_id: str = ""
     metrics_url: str = ""                      # prometheus /metrics endpoint
-    webhook_url: str = ""                      # alert webhook (slack/discord/custom)
+    webhook_url: str = ""                      # alert webhook
 
 
 # ── Canary / Monitoring ──────────────────────────────────────
