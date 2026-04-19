@@ -6,17 +6,27 @@ from pydantic import BaseModel, Field
 
 # ── Projects ─────────────────────────────────────────────────
 
-class CIConfig(BaseModel):
-    """CI environment config — all CI runs via SSH on a remote machine."""
-    ssh_host: str = ""                         # e.g. "47.96.xx.xx"
-    ssh_user: str = "root"                     # SSH user
+class EnvConfig(BaseModel):
+    """SSH connection + commands for one environment (ci / pre / prod)."""
+    ssh_host: str = ""
+    ssh_user: str = "root"
     ssh_port: int = 22
-    ssh_key_path: str = "~/.ssh/id_rsa"        # key on Aegis server
-    work_dir: str = "/opt/aegis-ci"            # remote working directory
-    install_command: str = "pip install -r requirements.txt"
-    test_command: str = "python -m pytest tests/ -v --tb=short"
-    lint_command: str = ""                     # optional
+    ssh_key_path: str = "~/.ssh/id_rsa"
+    work_dir: str = "/opt/aegis"               # remote working directory
+    # CI gates (ci env only)
+    install_command: str = ""                  # e.g. "pip install -r requirements.txt"
+    test_command: str = ""                     # e.g. "python -m pytest tests/ -v"
+    lint_command: str = ""                     # e.g. "ruff check ."
+    # Deployment (pre / prod)
+    deploy_command: str = ""                   # e.g. "cd /opt/app && git pull && systemctl restart app"
+    health_check_url: str = ""                 # e.g. "http://localhost:8000/status"
     timeout_seconds: int = 300
+
+class Environments(BaseModel):
+    """All environments for a project. Aegis maps ticket phases to environments."""
+    ci: EnvConfig = Field(default_factory=EnvConfig)    # run tests here
+    pre: EnvConfig = Field(default_factory=EnvConfig)   # canary deploy here
+    prod: EnvConfig = Field(default_factory=EnvConfig)  # full rollout here
 
 class ProjectCreate(BaseModel):
     id: str                                    # e.g. "novaic-gateway"
@@ -24,12 +34,12 @@ class ProjectCreate(BaseModel):
     description: str = ""
     repo_url: str                              # https://github.com/org/repo (required)
     tech_stack: list[str] = Field(default_factory=list)
-    conventions: dict = Field(default_factory=dict)      # coding standards + owners_map
-    ci_config: CIConfig = Field(default_factory=CIConfig) # how to run CI
+    conventions: dict = Field(default_factory=dict)
+    environments: Environments = Field(default_factory=Environments)
     default_domain: str = ""
     master_id: str = ""
-    metrics_url: str = ""                      # prometheus /metrics endpoint
-    webhook_url: str = ""                      # alert webhook
+    metrics_url: str = ""
+    webhook_url: str = ""
 
 
 # ── Canary / Monitoring ──────────────────────────────────────

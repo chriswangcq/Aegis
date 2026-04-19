@@ -209,12 +209,12 @@ def get_ticket(tid: str):
 @app.post("/projects")
 def create_project(body: ProjectCreate):
     now = now_ms()
-    ci_cfg = body.ci_config.model_dump()
+    envs = body.environments.model_dump()
     db().execute(
-        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,ci_config_json,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO projects (id,name,description,repo_url,tech_stack,conventions,environments_json,default_domain,master_id,metrics_url,webhook_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (body.id, body.name, body.description, body.repo_url,
          json.dumps(body.tech_stack), json.dumps(body.conventions),
-         json.dumps(ci_cfg),
+         json.dumps(envs),
          body.default_domain, body.master_id, body.metrics_url, body.webhook_url, now, now))
     log_event(db(), "project_created", body.id, body.master_id)
     db().commit()
@@ -223,7 +223,7 @@ def create_project(body: ProjectCreate):
     return {"id": body.id, "name": body.name, "master_id": body.master_id,
             "repo_url": body.repo_url,
             "api_keys": result.api_keys,
-            "ci_config": ci_cfg}
+            "environments": envs}
 
 @app.get("/projects")
 def list_projects(status: str = "active"):
@@ -370,22 +370,23 @@ def submit_ticket(tid: str, body: TicketSubmit):
     if phase in ("implementation", "rework"):
         if not t["project_id"]:
             raise HTTPException(400, "Ticket must belong to a project")
-        proj = db().execute("SELECT repo_url, ci_config_json FROM projects WHERE id=?",
+        proj = db().execute("SELECT repo_url, environments_json FROM projects WHERE id=?",
                             (t["project_id"],)).fetchone()
         if not proj or not proj["repo_url"]:
             raise HTTPException(400, "Project must have repo_url")
         if not body.branch and not body.commit_sha:
             raise HTTPException(400, "Must submit branch or commit_sha (git push first)")
 
-        ci_cfg = json.loads(proj["ci_config_json"] or "{}") if proj["ci_config_json"] else {}
-        if not ci_cfg.get("ssh_host"):
-            raise HTTPException(400, "Project ci_config.ssh_host not configured — set it via PATCH /projects/{id}")
+        envs = json.loads(proj["environments_json"] or "{}") if proj["environments_json"] else {}
+        ci_env = envs.get("ci", {})
+        if not ci_env.get("ssh_host"):
+            raise HTTPException(400, "Project environments.ci.ssh_host not configured")
 
         from . import ci_runner
         ci_results = ci_runner.run_ci_via_ssh(
             proj["repo_url"], branch=body.branch or "main",
             commit_sha=body.commit_sha,
-            ci_config=ci_cfg,
+            ci_config=ci_env,
             test_specs=test_specs, checklist=checklist
         )
 
@@ -396,7 +397,7 @@ def submit_ticket(tid: str, body: TicketSubmit):
                 "message": f"{len(failed)} CI gate(s) failed",
                 "failed_gates": details,
                 "verification_mode": "ssh_remote",
-                "hint": "Aegis SSHed into the CI server and ran these checks — results cannot be faked."
+                "hint": "Aegis SSHed into the CI server and ran these checks."
             })
     else:
         # Non-impl phases: validate evidence normally
@@ -668,6 +669,63 @@ def get_post_mortem(ticket_id: str):
         "patterns": result.patterns,
         "action_items": result.action_items
     }
+
+# ── DEPLOY ────────────────────────────────────────────────────
+
+@app.post("/projects/{pid}/deploy/{env}")
+def deploy_to_env(pid: str, env: str, branch: str = "main"):
+    """Deploy a project to pre or prod environment via SSH.
+
+    Aegis SSHes into the target environment and runs deploy_command.
+    Then checks health_check_url if configured.
+    """
+    if env not in ("pre", "prod"):
+        raise HTTPException(400, "env must be 'pre' or 'prod'")
+
+    proj = db().execute("SELECT repo_url,environments_json FROM projects WHERE id=?", (pid,)).fetchone()
+    if not proj: raise HTTPException(404)
+
+    envs = json.loads(proj["environments_json"] or "{}")
+    env_cfg = envs.get(env, {})
+    if not env_cfg.get("ssh_host"):
+        raise HTTPException(400, f"environments.{env}.ssh_host not configured")
+    if not env_cfg.get("deploy_command"):
+        raise HTTPException(400, f"environments.{env}.deploy_command not configured")
+
+    from . import ci_runner
+    now = now_ms()
+
+    # Step 1: Deploy
+    code, output = ci_runner._ssh_run(
+        env_cfg["ssh_host"], env_cfg.get("ssh_user", "root"),
+        env_cfg.get("ssh_port", 22), env_cfg.get("ssh_key_path", "~/.ssh/id_rsa"),
+        env_cfg["deploy_command"],
+        timeout=env_cfg.get("timeout_seconds", 300))
+
+    if code != 0:
+        log_event(db(), "deploy_failed", pid, "system", env, f"exit={code}")
+        db().commit()
+        raise HTTPException(500, {"message": f"Deploy to {env} failed",
+                                   "output": output[:1000]})
+
+    log_event(db(), "deployed", pid, "system", "", env)
+
+    # Step 2: Health check
+    health_ok = True
+    health_output = ""
+    if env_cfg.get("health_check_url"):
+        h_code, h_output = ci_runner._ssh_run(
+            env_cfg["ssh_host"], env_cfg.get("ssh_user", "root"),
+            env_cfg.get("ssh_port", 22), env_cfg.get("ssh_key_path", "~/.ssh/id_rsa"),
+            f"curl -sf {env_cfg['health_check_url']} || exit 1",
+            timeout=30)
+        health_ok = h_code == 0
+        health_output = h_output
+
+    db().commit()
+    return {"project_id": pid, "env": env, "status": "ok" if health_ok else "unhealthy",
+            "deploy_output": output[:500],
+            "health_check": health_output[:200] if health_output else "not configured"}
 
 # ── CANARY / MONITORING / ROLLBACK ────────────────────────────
 

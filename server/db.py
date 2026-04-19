@@ -81,7 +81,7 @@ def init_schema(conn: sqlite3.Connection):
         repo_url       TEXT NOT NULL,
         tech_stack     TEXT DEFAULT '[]',
         conventions    TEXT DEFAULT '{}',
-        ci_config_json TEXT DEFAULT '{}',            -- {install_command, test_command, lint_command, timeout_seconds}
+        environments_json TEXT DEFAULT '{}',     -- {ci: {...}, pre: {...}, prod: {...}}
         default_domain TEXT DEFAULT '',
         master_id      TEXT,
         status         TEXT DEFAULT 'active',
