@@ -107,6 +107,8 @@ def init_schema(conn: sqlite3.Connection):
         id             TEXT PRIMARY KEY,  -- coder / reviewer / qa / deployer
         display_name   TEXT NOT NULL,
         description    TEXT,
+        owner_id       TEXT,             -- agent who owns this role (designs exams, manages team)
+        interviewer_id TEXT,             -- agent who conducts exams
         exam_json      TEXT DEFAULT '[]', -- list of exam questions
         min_pass_score REAL DEFAULT 0.7,  -- minimum score to certify
         created_at     INTEGER,
@@ -124,8 +126,9 @@ def init_schema(conn: sqlite3.Connection):
         trust_json     TEXT DEFAULT '{}',   -- trust is PER ROLE
         tasks_completed INTEGER DEFAULT 0,
         tasks_failed   INTEGER DEFAULT 0,
+        interviewed_by TEXT,               -- who graded the exam
         certified_at   INTEGER,
-        expires_at     INTEGER,            -- optional: recertify periodically
+        expires_at     INTEGER,            -- recertify periodically (NULL = permanent)
         created_at     INTEGER,
         updated_at     INTEGER,
         UNIQUE(agent_id, role_id)

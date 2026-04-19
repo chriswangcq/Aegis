@@ -219,11 +219,16 @@ def claim_ticket(tid: str, body: TicketClaim):
     if phase not in PHASE_ROLE and not expired:
         raise HTTPException(409, f"Phase '{phase}' not claimable")
     required_role = PHASE_ROLE.get(phase, "coder")
-    # CHECK CERTIFICATION
-    cert = db().execute("SELECT status FROM certifications WHERE agent_id=? AND role_id=? AND status='passed'",
+    # CHECK CERTIFICATION (and expiry)
+    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=? AND status='passed'",
                         (body.agent_id, required_role)).fetchone()
     if not cert:
         raise HTTPException(403, f"Agent '{body.agent_id}' not certified as '{required_role}'. Take exam: GET /roles/{required_role}/exam")
+    if cert["expires_at"] and cert["expires_at"] < now:
+        db().execute("UPDATE certifications SET status='expired', updated_at=? WHERE agent_id=? AND role_id=?",
+                     (now, body.agent_id, required_role))
+        db().commit()
+        raise HTTPException(403, f"Certification expired. Recertify: GET /roles/{required_role}/exam")
     next_map = {"ready": "preflight", "implementation": "implementation", "preflight_rework": "preflight_rework",
                 "rework": "rework", "preflight_review": "preflight_review", "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
     next_phase = next_map.get(phase, phase)
