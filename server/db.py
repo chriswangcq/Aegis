@@ -123,10 +123,11 @@ def init_schema(conn: sqlite3.Connection):
     CREATE TABLE IF NOT EXISTS agents (
         id             TEXT PRIMARY KEY,
         display_name   TEXT,
-        provider       TEXT,            -- gemini / claude / gpt / human
+        provider       TEXT,
+        webhook_url    TEXT DEFAULT '',      -- Aegis notifies agent here
         status         TEXT DEFAULT 'idle',
         current_ticket TEXT,
-        current_role   TEXT,            -- role they're currently acting as
+        current_role   TEXT,
         last_active_at INTEGER,
         created_at     INTEGER,
         updated_at     INTEGER

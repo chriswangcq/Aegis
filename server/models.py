@@ -12,14 +12,15 @@ class EnvConfig(BaseModel):
     ssh_user: str = "root"
     ssh_port: int = 22
     ssh_key_path: str = "~/.ssh/id_rsa"
-    work_dir: str = "/opt/aegis"               # remote working directory
+    work_dir: str = "/opt/aegis"
     # CI gates (ci env only)
-    install_command: str = ""                  # e.g. "pip install -r requirements.txt"
-    test_command: str = ""                     # e.g. "python -m pytest tests/ -v"
-    lint_command: str = ""                     # e.g. "ruff check ."
+    install_command: str = ""
+    test_command: str = ""
+    lint_command: str = ""
     # Deployment (pre / prod)
-    deploy_command: str = ""                   # e.g. "cd /opt/app && git pull && systemctl restart app"
-    health_check_url: str = ""                 # e.g. "http://localhost:8000/status"
+    deploy_command: str = ""
+    rollback_command: str = ""                 # e.g. "cd /opt/app && git checkout HEAD~1 && systemctl restart app"
+    health_check_url: str = ""
     timeout_seconds: int = 300
 
 class Environments(BaseModel):
@@ -104,6 +105,7 @@ class AgentRegister(BaseModel):
     id: str
     display_name: str = ""
     provider: str = "unknown"  # gemini / claude / gpt / human
+    webhook_url: str = ""      # Aegis notifies agent here when tickets change
 
 
 # ── Certification / Exam ─────────────────────────────────────

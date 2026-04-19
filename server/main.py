@@ -7,6 +7,7 @@ from .db import get_db, init_schema, seed_roles, now_ms, log_event, PHASE_ROLE, 
 from .models import *
 from . import logic
 from . import provisioner
+from . import automation
 
 logger = logging.getLogger("command-center")
 _conn = None
@@ -39,7 +40,11 @@ def _trust(agent_id, role_id, ticket_id, dim, delta, reason, priority=3):
 async def lifespan(app):
     global _conn
     _conn = get_db(); init_schema(_conn); seed_roles(_conn)
-    logger.info("Aegis v1.0 ready"); yield; _conn.close()
+    automation.start_canary_poller(db, interval_seconds=60)
+    logger.info("Aegis v1.0 ready")
+    yield
+    automation.stop_canary_poller()
+    _conn.close()
 
 app = FastAPI(title="Aegis", description="AI-native engineering governance platform", version="1.0.0", lifespan=lifespan)
 
@@ -154,8 +159,8 @@ def list_agents():
 @app.post("/agents")
 def register_agent(body: AgentRegister):
     now = now_ms()
-    db().execute("INSERT OR REPLACE INTO agents (id,display_name,provider,status,created_at,updated_at) VALUES(?,?,?,'idle',?,?)",
-                 (body.id, body.display_name or body.id, body.provider, now, now))
+    db().execute("INSERT OR REPLACE INTO agents (id,display_name,provider,webhook_url,status,created_at,updated_at) VALUES(?,?,?,?,'idle',?,?)",
+                 (body.id, body.display_name or body.id, body.provider, body.webhook_url, now, now))
     log_event(db(), "agent_registered", agent_id=body.id)
     db().commit()
     return {"id": body.id, "next_step": "GET /roles to see available roles, then GET /roles/{id}/exam to take certification exam"}
@@ -375,6 +380,9 @@ def claim_ticket(tid: str, body: TicketClaim):
     db().execute("UPDATE agents SET status='busy',current_ticket=?,current_role=?,last_active_at=?,updated_at=? WHERE id=?",
                  (tid, role, now, now, body.agent_id))
     log_event(db(), "claimed", tid, body.agent_id, t["phase"], next_phase); db().commit()
+    # Notify agent they've been assigned
+    automation.notify_agent(db(), body.agent_id, "ticket_claimed", {
+        "ticket_id": tid, "phase": next_phase, "role": role})
     return {"ticket_id": tid, "role": role, "phase": next_phase, "agent_id": body.agent_id}
 
 @app.post("/tickets/{tid}/submit")
@@ -544,6 +552,20 @@ def advance_ticket(tid: str, body: TicketAdvance):
     if body.target_phase == "monitoring" and t["project_id"]:
         deploy_result = _auto_deploy(t["project_id"], "pre")
         r["deploy"] = deploy_result
+
+    # Notify: needs_review → notify all certified reviewers
+    if body.target_phase == "code_review":
+        reviewers = db().execute(
+            "SELECT a.id FROM agents a JOIN certifications c ON a.id=c.agent_id "
+            "WHERE c.role_id='reviewer' AND c.status='passed' AND a.webhook_url!=''").fetchall()
+        for rv in reviewers:
+            automation.notify_agent(db(), rv["id"], "review_needed", {
+                "ticket_id": tid, "project_id": t["project_id"] or ""})
+
+    # Notify project agents on deploy/done events
+    if body.target_phase in ("monitoring", "done") and t["project_id"]:
+        automation.notify_project_agents(db(), t["project_id"], "phase_changed", {
+            "ticket_id": tid, "phase": body.target_phase})
 
     return r
 
@@ -803,19 +825,24 @@ def canary_health_check(tid: str, body: MetricsReport):
         db().execute("INSERT INTO tickets (id,project_id,title,description,phase,priority,risk_level,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (plan.ticket_id, t["project_id"], f"ROLLBACK: {t['title']}",
                       plan.reason, "ready", 5, "critical", "system", now, now))
-        db().execute("UPDATE tickets SET canary_stage=0,updated_at=? WHERE id=?", (now, tid))
+        db().execute("UPDATE tickets SET canary_stage=0,phase='rework',updated_at=? WHERE id=?", (now, tid))
         log_event(db(), "auto_rollback", tid, "system", "monitoring", "rollback")
 
-        # Send alert webhook if configured
+        # Execute rollback on pre environment
+        rollback_result = None
         if t["project_id"]:
-            proj = db().execute("SELECT webhook_url,risk_level FROM projects WHERE id=?", (t["project_id"],)).fetchone()
+            rollback_result = automation.execute_rollback(
+                db(), t["project_id"], tid, "pre")
+            # Send alert webhook if configured
+            proj = db().execute("SELECT webhook_url FROM projects WHERE id=?", (t["project_id"],)).fetchone()
             alert = logic.build_alert(tid, t["project_id"], health, t["risk_level"])
             if alert and proj and proj["webhook_url"]:
                 _send_webhook(proj["webhook_url"], alert)
 
         db().commit()
         return {"action": "rollback", "rollback_ticket": plan.ticket_id,
-                "reason": rollback_check.error}
+                "reason": rollback_check.error,
+                "rollback_deploy": rollback_result}
 
     # Check promotion
     promote = logic.should_promote_canary(
