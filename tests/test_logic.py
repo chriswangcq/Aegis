@@ -227,6 +227,18 @@ def test_no_unit_checklist_no_kill_test_needed():
         checklist=checklist)
     assert r.ok
 
+def test_failing_verdict_rejected():
+    """Vuln 5: evidence with verdict='fail' must be rejected"""
+    r = validate_submit_evidence("implementation",
+        [{"evidence_type": "stdout", "content": "pytest: 3 FAILED", "verdict": "fail"}])
+    assert not r.ok
+    assert "verdict" in r.error
+
+def test_passing_verdict_accepted():
+    r = validate_submit_evidence("implementation",
+        [{"evidence_type": "stdout", "content": "all passed", "verdict": "pass"}])
+    assert r.ok
+
 
 # ── run_gates ────────────────────────────────────────────────
 
@@ -271,6 +283,16 @@ def test_gate_lint_fails_with_violations():
     lint_v = [v for v in verdicts if v.gate == "lint_purity"]
     assert not lint_v[0].passed
 
+def test_gate_lint_injection_blocked():
+    """Vuln 7: injected string containing '0 violations' must NOT pass"""
+    cl = [{"description": "提取 _logic.py"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"},
+         {"evidence_type": "lint", "content": "Found 5 violations but 0 violations were critical"}],
+        checklist=cl)
+    lint_v = [v for v in verdicts if v.gate == "lint_purity"]
+    assert not lint_v[0].passed
+
 def test_gate_kill_test_required_for_unit():
     cl = [{"description": "新增 validate_transfer [unit]"}]
     verdicts = run_gates("implementation",
@@ -299,7 +321,7 @@ def test_gate_all_pass_complete_evidence():
     verdicts = run_gates("implementation",
         [{"evidence_type": "stdout"},
          {"evidence_type": "kill_test", "content": "deleted function → test red"},
-         {"evidence_type": "lint", "content": "0 violations."},
+         {"evidence_type": "lint", "content": "Scanned 2 logic files, 0 violations."},
          {"evidence_type": "e2e", "content": "all passed"}],
         checklist=cl)
     assert all(v.passed for v in verdicts)

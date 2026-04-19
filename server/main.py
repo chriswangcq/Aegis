@@ -219,7 +219,7 @@ def claim_ticket(tid: str, body: TicketClaim):
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
     required_role = PHASE_ROLE.get(t["phase"], "coder")
-    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=?",
+    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=? ORDER BY updated_at DESC LIMIT 1",
                         (body.agent_id, required_role)).fetchone()
 
     # ── Logic: pure function ──
@@ -236,16 +236,18 @@ def claim_ticket(tid: str, body: TicketClaim):
 
     # ── Logic: anti-self-review ──
     if required_role == "reviewer":
-        coder_ev = db().execute(
-            "SELECT e.agent_id, a.provider FROM evidence e JOIN agents a ON a.id=e.agent_id WHERE e.ticket_id=? LIMIT 1",
-            (tid,)).fetchone()
+        # Check ALL impl/rework evidence, not just first row (vuln 3 fix)
+        coder_evs = db().execute(
+            "SELECT DISTINCT e.agent_id, a.provider FROM evidence e JOIN agents a ON a.id=e.agent_id "
+            "WHERE e.ticket_id=? AND e.phase IN ('implementation','rework','preflight_rework')",
+            (tid,)).fetchall()
         my_provider = db().execute("SELECT provider FROM agents WHERE id=?", (body.agent_id,)).fetchone()
-        review_check = logic.can_review(
-            body.agent_id, my_provider["provider"] if my_provider else "",
-            coder_ev["agent_id"] if coder_ev else None,
-            coder_ev["provider"] if coder_ev else None)
-        if not review_check.ok:
-            raise HTTPException(403, review_check.error)
+        for cev in (coder_evs or []):
+            review_check = logic.can_review(
+                body.agent_id, my_provider["provider"] if my_provider else "",
+                cev["agent_id"], cev["provider"])
+            if not review_check.ok:
+                raise HTTPException(403, review_check.error)
 
     # ── I/O: write ──
     next_phase = result.data["next_phase"]
@@ -311,28 +313,47 @@ def reject_ticket(tid: str, body: TicketReject):
     now = now_ms()
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
+    # Auth: reject requires a reviewer who is assigned to this ticket, or master
+    if body.agent_id:
+        if t["assigned_to"] and t["assigned_to"] != body.agent_id:
+            raise HTTPException(403, f"Only assigned reviewer '{t['assigned_to']}' or master can reject")
     reject_map = {"preflight_review": "preflight_rework", "code_review": "rework", "qa": "rework", "merge_ready": "rework"}
     next_phase = reject_map.get(t["phase"])
     if not next_phase: raise HTTPException(409)
+    rejector = body.agent_id or t["assigned_to"] or "master"
     for bc in body.blocker_comments:
         db().execute("INSERT INTO comments (ticket_id,author_id,author_role,content,comment_type,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                     (tid, t["assigned_to"] or "master", "reviewer", bc, "blocker", "open", now, now))
+                     (tid, rejector, t["assigned_role"] or "reviewer", bc, "blocker", "open", now, now))
     rounds = (t["review_rounds"] or 0) + 1
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,assigned_role=NULL,locked_at=NULL,review_rounds=?,updated_at=? WHERE id=?", (next_phase, rounds, now, tid))
+    # Penalize the original coder, not the reviewer
+    coder_ev = db().execute(
+        "SELECT DISTINCT e.agent_id, e.phase FROM evidence e WHERE e.ticket_id=? AND e.phase IN ('implementation','rework')",
+        (tid,)).fetchone()
+    coder_id = coder_ev["agent_id"] if coder_ev else None
+    if coder_id:
+        coder_role = "coder"
+        _trust(coder_id, coder_role, tid, "code_quality", -0.03, f"rejected: {body.reason[:50]}")
+        db().execute("UPDATE certifications SET tasks_failed=tasks_failed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, coder_id, coder_role))
     if t["assigned_to"]:
         db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, t["assigned_to"]))
-        role = t["assigned_role"] or "coder"
-        _trust(t["assigned_to"], role, tid, "code_quality", -0.03, f"rejected: {body.reason[:50]}")
-        db().execute("UPDATE certifications SET tasks_failed=tasks_failed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, t["assigned_to"], role))
-    log_event(db(), "rejected", tid, t["assigned_to"], t["phase"], next_phase, json.dumps({"reason": body.reason, "round": rounds})); db().commit()
-    return {"ticket_id": tid, "phase": next_phase, "review_round": rounds}
+    log_event(db(), "rejected", tid, rejector, t["phase"], next_phase, json.dumps({"reason": body.reason, "round": rounds})); db().commit()
+    return {"ticket_id": tid, "phase": next_phase, "review_round": rounds, "rejected_by": rejector}
 
 @app.post("/tickets/{tid}/advance")
 def advance_ticket(tid: str, body: TicketAdvance):
+    """Only master-certified agents can advance tickets."""
     now = now_ms()
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
     if body.target_phase not in VALID_PHASES: raise HTTPException(400)
+    # Auth: advance is a master-only action (skip check if no agent_id for backward compat)
+    if hasattr(body, 'agent_id') and body.agent_id:
+        master_cert = db().execute(
+            "SELECT status FROM certifications WHERE agent_id=? AND role_id='master' AND status='passed'",
+            (body.agent_id,)).fetchone()
+        if not master_cert:
+            raise HTTPException(403, "Only master-certified agents can advance tickets")
     old = t["phase"]
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,locked_at=NULL,updated_at=? WHERE id=?", (body.target_phase, now, tid))
     unblocked = []

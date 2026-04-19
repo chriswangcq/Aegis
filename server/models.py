@@ -36,9 +36,11 @@ class TicketSubmit(BaseModel):
 class TicketAdvance(BaseModel):
     target_phase: str
     reason: str = ""
+    agent_id: str = ""  # must be master-certified to advance
 
 
 class TicketReject(BaseModel):
+    agent_id: str = ""  # must be assigned reviewer or master
     reason: str
     blocker_comments: list[str] = Field(default_factory=list)
 

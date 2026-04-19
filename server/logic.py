@@ -183,6 +183,12 @@ def validate_submit_evidence(phase: str, evidence: list[dict],
     """
     types = {e.get("evidence_type", "") for e in evidence}
 
+    # Check no evidence has failing verdict
+    for e in evidence:
+        if e.get("verdict", "").lower() in ("fail", "failed", "error"):
+            return Result(ok=False,
+                error=f"Evidence '{e.get('evidence_type')}' has verdict='{e['verdict']}' — fix before submitting")
+
     if phase in ("implementation", "rework"):
         if not types & {"stdout", "test", "test_result"}:
             return Result(ok=False, error="Implementation submit requires test evidence (stdout/test/test_result)")
@@ -246,13 +252,14 @@ def run_gates(phase: str, evidence: list[dict],
                     "Checklist has _logic.py items — run `python scripts/lint_logic_purity.py .` "
                     "and include output as evidence_type='lint'"))
             else:
-                # Check that lint output says 0 violations
+                # Check that lint output says 0 violations (strict pattern)
                 content = " ".join(e.get("content", "") for e in lint_ev)
-                if "0 violations" in content:
+                import re
+                if re.search(r"Scanned \d+ logic files?, 0 violations", content):
                     verdicts.append(GateVerdict("lint_purity", True, "lint clean"))
                 else:
                     verdicts.append(GateVerdict("lint_purity", False,
-                        f"lint_purity failed: {content[:100]}"))
+                        f"lint_purity: output doesn't match expected format. Got: {content[:100]}"))
 
     # ── Gate 2: kill_test ──
     # If checklist has [unit] items, require kill_test proof
