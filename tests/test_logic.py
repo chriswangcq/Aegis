@@ -228,6 +228,89 @@ def test_no_unit_checklist_no_kill_test_needed():
     assert r.ok
 
 
+# ── run_gates ────────────────────────────────────────────────
+
+from server.logic import run_gates
+
+def test_gates_skip_non_impl_phases():
+    verdicts = run_gates("preflight", [{"evidence_type": "preflight"}])
+    assert verdicts == []  # no gates for preflight
+
+def test_gate_test_evidence_required():
+    verdicts = run_gates("implementation", [{"evidence_type": "diff"}])
+    failed = [v for v in verdicts if not v.passed]
+    assert any(v.gate == "test_evidence" for v in failed)
+
+def test_gate_test_evidence_passes():
+    verdicts = run_gates("implementation", [{"evidence_type": "stdout"}])
+    assert all(v.passed for v in verdicts)
+
+def test_gate_lint_required_for_logic_items():
+    cl = [{"description": "提取 parse_send_logic.py [unit]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"}, {"evidence_type": "kill_test"}],
+        checklist=cl)
+    failed = [v for v in verdicts if not v.passed]
+    assert any(v.gate == "lint_purity" for v in failed)
+
+def test_gate_lint_passes_with_clean_output():
+    cl = [{"description": "提取 parse_send_logic.py [unit]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"}, {"evidence_type": "kill_test"},
+         {"evidence_type": "lint", "content": "Scanned 3 logic files, 0 violations."}],
+        checklist=cl)
+    lint_v = [v for v in verdicts if v.gate == "lint_purity"]
+    assert lint_v[0].passed
+
+def test_gate_lint_fails_with_violations():
+    cl = [{"description": "提取 _logic.py"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"},
+         {"evidence_type": "lint", "content": "1 violations."}],
+        checklist=cl)
+    lint_v = [v for v in verdicts if v.gate == "lint_purity"]
+    assert not lint_v[0].passed
+
+def test_gate_kill_test_required_for_unit():
+    cl = [{"description": "新增 validate_transfer [unit]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"}],
+        checklist=cl)
+    failed = [v for v in verdicts if not v.passed]
+    assert any(v.gate == "kill_test" for v in failed)
+
+def test_gate_e2e_required_when_tagged():
+    cl = [{"description": "改造 send_action 路由 [e2e]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"}],
+        checklist=cl)
+    failed = [v for v in verdicts if not v.passed]
+    assert any(v.gate == "e2e_coverage" for v in failed)
+
+def test_gate_e2e_passes_when_provided():
+    cl = [{"description": "改造路由 [e2e]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"}, {"evidence_type": "e2e", "content": "all passed"}],
+        checklist=cl)
+    assert all(v.passed for v in verdicts)
+
+def test_gate_all_pass_complete_evidence():
+    cl = [{"description": "提取 _logic.py [unit]"}, {"description": "E2E 验证 [e2e]"}]
+    verdicts = run_gates("implementation",
+        [{"evidence_type": "stdout"},
+         {"evidence_type": "kill_test", "content": "deleted function → test red"},
+         {"evidence_type": "lint", "content": "0 violations."},
+         {"evidence_type": "e2e", "content": "all passed"}],
+        checklist=cl)
+    assert all(v.passed for v in verdicts)
+    gates = [v.gate for v in verdicts]
+    assert "lint_purity" in gates
+    assert "kill_test" in gates
+    assert "test_evidence" in gates
+    assert "e2e_coverage" in gates
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+

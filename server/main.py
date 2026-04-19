@@ -277,17 +277,34 @@ def submit_ticket(tid: str, body: TicketSubmit):
     if not ev_check.ok:
         raise HTTPException(400, ev_check.error)
 
+    # ── System: automated gates ──
+    gate_verdicts = logic.run_gates(phase, ev_dicts, checklist=checklist)
+    failed_gates = [g for g in gate_verdicts if not g.passed]
+    if failed_gates:
+        details = [{"gate": g.gate, "reason": g.reason} for g in failed_gates]
+        raise HTTPException(400, {
+            "message": f"{len(failed_gates)} automated gate(s) failed",
+            "failed_gates": details,
+            "hint": "Fix these issues and re-submit. Gates are automated — no human can override them."
+        })
+
     # ── I/O: write ──
     for ev in body.evidence:
         db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
                      (tid, phase, body.agent_id, ev.evidence_type, ev.content, ev.verdict, now))
+    # Record gate results as evidence too
+    for g in gate_verdicts:
+        db().execute("INSERT INTO evidence (ticket_id,phase,agent_id,evidence_type,content,verdict,timestamp) VALUES(?,?,?,?,?,?,?)",
+                     (tid, phase, "system", "gate", f"[{g.gate}] {g.reason}", "pass" if g.passed else "fail", now))
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,assigned_role=NULL,locked_at=NULL,updated_at=? WHERE id=?", (next_phase, now, tid))
     db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, body.agent_id))
     role = t["assigned_role"] or "coder"
     _trust(body.agent_id, role, tid, "commit_discipline", +0.02, f"clean submit from {phase}")
     db().execute("UPDATE certifications SET tasks_completed=tasks_completed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, body.agent_id, role))
     log_event(db(), "submitted", tid, body.agent_id, phase, next_phase); db().commit()
-    return {"ticket_id": tid, "previous_phase": phase, "new_phase": next_phase}
+    passed_gates = [g.gate for g in gate_verdicts if g.passed]
+    return {"ticket_id": tid, "previous_phase": phase, "new_phase": next_phase,
+            "gates_passed": passed_gates}
 
 @app.post("/tickets/{tid}/reject")
 def reject_ticket(tid: str, body: TicketReject):

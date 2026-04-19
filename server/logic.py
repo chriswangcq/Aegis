@@ -203,3 +203,87 @@ def validate_submit_evidence(phase: str, evidence: list[dict],
             return Result(ok=False, error="Code review submit requires review evidence (review/cr/approval)")
 
     return Result(ok=True)
+
+
+# ── Automated Gates ──────────────────────────────────────────
+
+# Gate definitions: each gate has a condition (when it triggers) and what evidence it requires.
+# Gates are checked AUTOMATICALLY on submit — no human role needed.
+
+@dataclass
+class GateVerdict:
+    gate: str
+    passed: bool
+    reason: str
+
+
+def run_gates(phase: str, evidence: list[dict],
+              checklist: list[dict] | None = None) -> list[GateVerdict]:
+    """Run all automated gates. Returns list of verdicts.
+
+    Gates are the system's immune system — they run without any human role.
+    If ANY gate fails, submit is rejected.
+    """
+    verdicts = []
+    types = {e.get("evidence_type", "") for e in evidence}
+    ev_by_type = {}
+    for e in evidence:
+        ev_by_type.setdefault(e.get("evidence_type", ""), []).append(e)
+
+    if phase not in ("implementation", "rework"):
+        return verdicts  # gates only apply to code submission phases
+
+    # ── Gate 1: lint_purity ──
+    # If checklist mentions _logic.py files, require lint evidence
+    if checklist:
+        logic_items = [c for c in checklist
+                       if "_logic" in c.get("description", "").lower()
+                       or "[unit]" in c.get("description", "")]
+        if logic_items:
+            lint_ev = ev_by_type.get("lint", [])
+            if not lint_ev:
+                verdicts.append(GateVerdict("lint_purity", False,
+                    "Checklist has _logic.py items — run `python scripts/lint_logic_purity.py .` "
+                    "and include output as evidence_type='lint'"))
+            else:
+                # Check that lint output says 0 violations
+                content = " ".join(e.get("content", "") for e in lint_ev)
+                if "0 violations" in content:
+                    verdicts.append(GateVerdict("lint_purity", True, "lint clean"))
+                else:
+                    verdicts.append(GateVerdict("lint_purity", False,
+                        f"lint_purity failed: {content[:100]}"))
+
+    # ── Gate 2: kill_test ──
+    # If checklist has [unit] items, require kill_test proof
+    if checklist:
+        unit_items = [c for c in checklist if "[unit]" in c.get("description", "")]
+        if unit_items:
+            if "kill_test" not in types:
+                verdicts.append(GateVerdict("kill_test", False,
+                    f"{len(unit_items)} checklist items tagged [unit] — must provide 'kill_test' "
+                    "evidence (delete the function, show the test turns red)"))
+            else:
+                verdicts.append(GateVerdict("kill_test", True, "kill_test provided"))
+
+    # ── Gate 3: test_evidence ──
+    # Always required for implementation
+    if not types & {"stdout", "test", "test_result"}:
+        verdicts.append(GateVerdict("test_evidence", False,
+            "No test evidence — include stdout/test/test_result"))
+    else:
+        verdicts.append(GateVerdict("test_evidence", True, "test evidence present"))
+
+    # ── Gate 4: e2e_coverage ──
+    # If checklist has [e2e] items, require e2e evidence
+    if checklist:
+        e2e_items = [c for c in checklist if "[e2e]" in c.get("description", "")]
+        if e2e_items:
+            if "e2e" not in types:
+                verdicts.append(GateVerdict("e2e_coverage", False,
+                    f"{len(e2e_items)} checklist items tagged [e2e] — must provide 'e2e' evidence"))
+            else:
+                verdicts.append(GateVerdict("e2e_coverage", True, "e2e evidence present"))
+
+    return verdicts
+
