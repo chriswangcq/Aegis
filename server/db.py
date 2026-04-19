@@ -20,6 +20,7 @@ VALID_PHASES = [
 PHASE_ROLE = {
     "ready":            "coder",
     "implementation":   "coder",
+    "self_test":        "coder",
     "preflight_rework": "coder",
     "rework":           "coder",
     "preflight_review": "reviewer",

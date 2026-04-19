@@ -229,8 +229,9 @@ def claim_ticket(tid: str, body: TicketClaim):
                      (now, body.agent_id, required_role))
         db().commit()
         raise HTTPException(403, f"Certification expired. Recertify: GET /roles/{required_role}/exam")
-    next_map = {"ready": "preflight", "implementation": "implementation", "preflight_rework": "preflight_rework",
-                "rework": "rework", "preflight_review": "preflight_review", "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
+    next_map = {"ready": "preflight", "implementation": "implementation", "self_test": "self_test",
+                "preflight_rework": "preflight_rework", "rework": "rework",
+                "preflight_review": "preflight_review", "code_review": "code_review", "qa": "qa", "deploy_prep": "deploy_prep"}
     next_phase = next_map.get(phase, phase)
     res = db().execute("UPDATE tickets SET phase=?,assigned_to=?,assigned_role=?,locked_at=?,updated_at=? WHERE id=? AND (phase=? OR (locked_at IS NOT NULL AND locked_at+lock_ttl_ms<?))",
                        (next_phase, body.agent_id, required_role, now, now, tid, phase, now))
