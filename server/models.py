@@ -7,11 +7,16 @@ from pydantic import BaseModel, Field
 # ── Projects ─────────────────────────────────────────────────
 
 class CIConfig(BaseModel):
-    """User-defined CI commands for a project."""
-    install_command: str = "pip install -r requirements.txt"   # run before tests
+    """CI environment config — all CI runs via SSH on a remote machine."""
+    ssh_host: str = ""                         # e.g. "47.96.xx.xx"
+    ssh_user: str = "root"                     # SSH user
+    ssh_port: int = 22
+    ssh_key_path: str = "~/.ssh/id_rsa"        # key on Aegis server
+    work_dir: str = "/opt/aegis-ci"            # remote working directory
+    install_command: str = "pip install -r requirements.txt"
     test_command: str = "python -m pytest tests/ -v --tb=short"
-    lint_command: str = ""                                     # optional: "ruff check ."
-    timeout_seconds: int = 300                                 # max CI execution time
+    lint_command: str = ""                     # optional
+    timeout_seconds: int = 300
 
 class ProjectCreate(BaseModel):
     id: str                                    # e.g. "novaic-gateway"

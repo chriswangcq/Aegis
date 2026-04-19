@@ -366,7 +366,7 @@ def submit_ticket(tid: str, body: TicketSubmit):
         test_specs = []
     ci_results = []
 
-    # ── Aegis CI: git-only verification ──
+    # ── Aegis CI: SSH-based verification ──
     if phase in ("implementation", "rework"):
         if not t["project_id"]:
             raise HTTPException(400, "Ticket must belong to a project")
@@ -378,12 +378,15 @@ def submit_ticket(tid: str, body: TicketSubmit):
             raise HTTPException(400, "Must submit branch or commit_sha (git push first)")
 
         ci_cfg = json.loads(proj["ci_config_json"] or "{}") if proj["ci_config_json"] else {}
+        if not ci_cfg.get("ssh_host"):
+            raise HTTPException(400, "Project ci_config.ssh_host not configured — set it via PATCH /projects/{id}")
+
         from . import ci_runner
-        ci_results = ci_runner.run_all_gates_from_git(
+        ci_results = ci_runner.run_ci_via_ssh(
             proj["repo_url"], branch=body.branch or "main",
             commit_sha=body.commit_sha,
-            test_specs=test_specs, checklist=checklist,
-            ci_config=ci_cfg
+            ci_config=ci_cfg,
+            test_specs=test_specs, checklist=checklist
         )
 
         failed = [r for r in ci_results if not r.passed]
@@ -392,8 +395,8 @@ def submit_ticket(tid: str, body: TicketSubmit):
             raise HTTPException(400, {
                 "message": f"{len(failed)} CI gate(s) failed",
                 "failed_gates": details,
-                "verification_mode": "system_executed",
-                "hint": "Aegis cloned your branch and ran these checks — results cannot be faked."
+                "verification_mode": "ssh_remote",
+                "hint": "Aegis SSHed into the CI server and ran these checks — results cannot be faked."
             })
     else:
         # Non-impl phases: validate evidence normally

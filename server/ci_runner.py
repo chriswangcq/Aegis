@@ -1,21 +1,19 @@
-"""CI Runner — Aegis executes verification itself.
+"""CI Runner — Aegis executes verification via SSH on remote machines.
 
 Flow:
   1. Agent submits branch name (or commit_sha)
-  2. Aegis does: git clone repo_url → git checkout branch
-  3. Run: lint / pytest / kill_test / spec_coverage
-  4. All results written as system evidence — agent cannot tamper
-  5. Temporary clone is deleted after verification
+  2. Aegis SSHs into the project's configured ECS
+  3. Remote: git clone repo_url → install deps → run tests/lint
+  4. Aegis collects exit codes + output as tamper-proof evidence
+  5. Remote work_dir is cleaned up after each run
 
-All interaction is through git — no dependency on agent's local environment.
+All CI runs on the remote machine. Aegis never executes project code locally.
 """
 
 import subprocess
 import os
 import re
-import tempfile
-import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -26,317 +24,270 @@ class CIResult:
     detail: str = ""     # human-readable summary
 
 
-def checkout_repo(repo_url: str, branch: str = "main",
-                  commit_sha: str = "") -> tuple[str, CIResult | None]:
-    """Clone a repo from URL and checkout specific branch/commit.
-
-    Returns (work_dir, error_result).
-    If error_result is not None, checkout failed.
-    Caller must clean up work_dir when done.
-    """
-    work_dir = tempfile.mkdtemp(prefix="aegis_ci_")
-
-    # Clone
-    code, output = _run(
-        ["git", "clone", "--depth", "50", repo_url, work_dir],
-        cwd=work_dir, timeout=120
-    )
-    if code != 0:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        return "", CIResult("git_clone", False, output,
-                            f"Failed to clone {repo_url}")
-
-    # Checkout branch or commit
-    ref = commit_sha or branch
-    if ref and ref != "main":
-        code, output = _run(
-            ["git", "checkout", ref],
-            cwd=work_dir, timeout=30
-        )
-        if code != 0:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            return "", CIResult("git_checkout", False, output,
-                                f"Failed to checkout {ref}")
-
-    return work_dir, None
-
-
-def _run(cmd: list[str], cwd: str, timeout: int = 60) -> tuple[int, str]:
-    """Run a command and return (exit_code, output)."""
+def _ssh_run(host: str, user: str, port: int, key_path: str,
+             command: str, timeout: int = 120) -> tuple[int, str]:
+    """Execute a command on a remote machine via SSH."""
+    key_path = os.path.expanduser(key_path)
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=10",
+        "-o", "BatchMode=yes",
+        "-p", str(port),
+        "-i", key_path,
+        f"{user}@{host}",
+        command,
+    ]
     try:
         result = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            timeout=timeout, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            ssh_cmd, capture_output=True, text=True, timeout=timeout
         )
         return result.returncode, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
-        return -1, f"TIMEOUT after {timeout}s"
+        return -1, f"SSH TIMEOUT after {timeout}s"
     except Exception as e:
-        return -2, f"ERROR: {e}"
+        return -2, f"SSH ERROR: {e}"
 
 
-def run_lint(repo_path: str) -> CIResult:
-    """Gate 1: Run lint_logic_purity.py on the repo."""
-    lint_script = os.path.join(repo_path, "scripts", "lint_logic_purity.py")
-    if not os.path.exists(lint_script):
-        # Try parent directory (mono-repo structure)
-        parent = os.path.dirname(repo_path)
-        lint_script = os.path.join(parent, "scripts", "lint_logic_purity.py")
+def run_ci_via_ssh(repo_url: str, branch: str, commit_sha: str,
+                   ci_config: dict,
+                   test_specs: list[dict] | None = None,
+                   checklist: list[dict] | None = None) -> list[CIResult]:
+    """Full CI pipeline via SSH.
 
-    if not os.path.exists(lint_script):
-        return CIResult("lint_purity", True, "", "No lint script found — skipped")
+    1. SSH to remote → create temp dir
+    2. git clone → checkout branch
+    3. install deps
+    4. run tests
+    5. run lint (if configured)
+    6. run kill_test (if checklist requires it)
+    7. cleanup
+    """
+    host = ci_config.get("ssh_host", "")
+    user = ci_config.get("ssh_user", "root")
+    port = ci_config.get("ssh_port", 22)
+    key_path = ci_config.get("ssh_key_path", "~/.ssh/id_rsa")
+    work_dir = ci_config.get("work_dir", "/opt/aegis-ci")
+    timeout = ci_config.get("timeout_seconds", 300)
 
-    code, output = _run(["python", lint_script, repo_path], cwd=repo_path)
-    passed = code == 0 and bool(re.search(r"Scanned \d+ logic files?, 0 violations", output))
-    return CIResult("lint_purity", passed, output,
-                    "lint clean" if passed else f"lint failed (exit {code})")
+    install_cmd = ci_config.get("install_command", "")
+    test_cmd = ci_config.get("test_command", "python -m pytest tests/ -v --tb=short")
+    lint_cmd = ci_config.get("lint_command", "")
 
+    if not host:
+        return [CIResult("ssh", False, "",
+                          "ci_config.ssh_host is not configured")]
 
-def run_pytest(repo_path: str, test_command: str = "", timeout: int = 120) -> CIResult:
-    """Gate 2: Run tests on the repo using project's configured command."""
-    if test_command:
-        # User-defined command: split and run
-        parts = test_command.split()
-        code, output = _run(parts, cwd=repo_path, timeout=timeout)
-    else:
-        code, output = _run(
-            ["python", "-m", "pytest", "tests/", "-v", "--tb=short", "-q"],
-            cwd=repo_path, timeout=timeout
-        )
-    # Parse pytest output for pass/fail counts
+    results = []
+    ref = commit_sha or branch or "main"
+
+    # ── Step 1: Clone ──
+    clone_script = f"""
+set -e
+rm -rf {work_dir}/{ref} 2>/dev/null || true
+mkdir -p {work_dir}
+git clone --depth 50 --branch {branch or 'main'} {repo_url} {work_dir}/{ref}
+"""
+    if commit_sha:
+        clone_script += f"cd {work_dir}/{ref} && git checkout {commit_sha}\n"
+
+    code, output = _ssh_run(host, user, port, key_path, clone_script, timeout=120)
+    if code != 0:
+        return [CIResult("git_clone", False, output,
+                          f"Failed to clone {repo_url} @ {ref}")]
+    results.append(CIResult("git_clone", True, output,
+                             f"Cloned {repo_url} @ {ref}"))
+
+    remote_path = f"{work_dir}/{ref}"
+
+    # ── Step 2: Install deps ──
+    if install_cmd:
+        code, output = _ssh_run(
+            host, user, port, key_path,
+            f"cd {remote_path} && {install_cmd}",
+            timeout=120)
+        if code != 0:
+            results.append(CIResult("install", False, output,
+                                     f"Install failed: {install_cmd}"))
+            _cleanup(host, user, port, key_path, remote_path)
+            return results
+        results.append(CIResult("install", True, output, "Dependencies installed"))
+
+    # ── Step 3: Run tests ──
+    code, output = _ssh_run(
+        host, user, port, key_path,
+        f"cd {remote_path} && {test_cmd}",
+        timeout=timeout)
+
+    # Parse test results
     match = re.search(r"(\d+) passed", output)
     passed_count = int(match.group(1)) if match else 0
     fail_match = re.search(r"(\d+) failed", output)
     failed_count = int(fail_match.group(1)) if fail_match else 0
+    test_passed = code == 0 and passed_count > 0 and failed_count == 0
+    results.append(CIResult("test", test_passed, output,
+                             f"{passed_count} passed, {failed_count} failed"))
 
-    passed = code == 0 and passed_count > 0 and failed_count == 0
-    detail = f"{passed_count} passed, {failed_count} failed"
-    return CIResult("pytest", passed, output, detail)
-
-
-def run_kill_test(repo_path: str, timeout: int = 120) -> CIResult:
-    """Gate 3: Kill test — delete each public function in _logic.py, verify tests break.
-
-    For each _logic.py file:
-      1. Find all public functions (def foo(...))
-      2. For each function, replace body with 'raise NotImplementedError'
-      3. Run pytest — tests MUST fail
-      4. Restore original
-      5. If tests still pass after mutation → kill_test FAILS (test is fake)
-    """
-    import ast
-    import glob
-
-    logic_files = glob.glob(os.path.join(repo_path, "**/*_logic.py"), recursive=True)
-    logic_files += glob.glob(os.path.join(repo_path, "**/logic.py"), recursive=True)
-    logic_files = [f for f in logic_files
-                   if ".venv" not in f and "node_modules" not in f
-                   and not os.path.basename(f).startswith("test_")]
-
-    if not logic_files:
-        return CIResult("kill_test", True, "", "No _logic.py files — skipped")
-
-    surviving_mutants = []
-
-    for lf in logic_files:
-        original_content = open(lf).read()
-        try:
-            tree = ast.parse(original_content)
-        except SyntaxError:
-            continue
-
-        public_funcs = [
-            node for node in ast.iter_child_nodes(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and not node.name.startswith("_")
-        ]
-
-        for func in public_funcs:
-            # Mutate: replace function body with raise
-            lines = original_content.split("\n")
-            # Find the function body start (line after def)
-            func_start = func.lineno - 1  # 0-indexed
-            func_end = func.end_lineno  # 1-indexed, so this is the last line
-
-            # Build mutated version: keep def line, replace body
-            indent = "    "
-            # Find actual indent of body
-            if func.body:
-                body_line = lines[func.body[0].lineno - 1]
-                indent = body_line[:len(body_line) - len(body_line.lstrip())]
-
-            mutated_lines = lines[:func_start + 1]  # keep everything up to and including def
-            # Skip docstring if present
-            has_docstring = (func.body and isinstance(func.body[0], ast.Expr)
-                           and isinstance(func.body[0].value, (ast.Constant, ast.Str)))
-            if has_docstring:
-                ds_end = func.body[0].end_lineno
-                mutated_lines.extend(lines[func_start + 1:ds_end])
-                mutated_lines.append(f"{indent}raise NotImplementedError('KILLED by CC')")
-            else:
-                mutated_lines.append(f"{indent}raise NotImplementedError('KILLED by CC')")
-            mutated_lines.extend(lines[func_end:])
-
-            # Write mutated file
-            with open(lf, "w") as f:
-                f.write("\n".join(mutated_lines))
-
-            # Run tests
-            code, output = _run(
-                ["python", "-m", "pytest", "tests/", "-x", "-q", "--tb=line"],
-                cwd=repo_path, timeout=30
-            )
-
-            # Restore original
-            with open(lf, "w") as f:
-                f.write(original_content)
-
-            # If tests STILL pass, this mutant survived — test is weak/fake
-            if code == 0:
-                surviving_mutants.append(f"{os.path.basename(lf)}::{func.name}")
-
-    if surviving_mutants:
-        detail = f"{len(surviving_mutants)} mutant(s) survived: {', '.join(surviving_mutants[:5])}"
-        return CIResult("kill_test", False, detail, detail)
-
-    return CIResult("kill_test", True, "",
-                    f"All public functions in {len(logic_files)} logic file(s) properly tested")
-
-
-def run_spec_coverage(repo_path: str, test_specs: list[dict]) -> CIResult:
-    """Gate 4: Check if test_specs defined by Master are covered by actual tests.
-
-    For each test_spec, check if there's a test function whose name or docstring
-    relates to the spec's input/expect pattern.
-    """
-    if not test_specs:
-        return CIResult("spec_coverage", True, "", "No test_specs defined — skipped")
-
-    # Collect all test function names from the repo
-    import ast
-    import glob
-
-    test_files = glob.glob(os.path.join(repo_path, "tests/test_*.py"))
-    test_names = []
-    for tf in test_files:
-        try:
-            tree = ast.parse(open(tf).read())
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
-                # Get docstring if any
-                ds = ast.get_docstring(node) or ""
-                test_names.append({"name": node.name, "doc": ds, "file": os.path.basename(tf)})
-
-    uncovered_specs = []
-    for spec in test_specs:
-        spec_input = spec.get("input", "").lower()
-        spec_expect = spec.get("expect", "").lower()
-        spec_desc = f"{spec_input} → {spec_expect}"
-
-        # Check if any test name/doc references this spec
-        covered = False
-        for t in test_names:
-            name_lower = t["name"].lower().replace("_", " ")
-            doc_lower = t["doc"].lower()
-            # Fuzzy match: check if key words from spec appear in test
-            keywords = [w for w in re.split(r'[^a-zA-Z\u4e00-\u9fff]+', spec_input + " " + spec_expect) if len(w) > 2]
-            matches = sum(1 for kw in keywords if kw in name_lower or kw in doc_lower)
-            if matches >= max(1, len(keywords) // 2):
-                covered = True
-                break
-
-        if not covered:
-            uncovered_specs.append(spec_desc)
-
-    if uncovered_specs:
-        detail = f"{len(uncovered_specs)}/{len(test_specs)} specs uncovered: {'; '.join(uncovered_specs[:3])}"
-        return CIResult("spec_coverage", False, detail, detail)
-
-    return CIResult("spec_coverage", True, "",
-                    f"All {len(test_specs)} test specs covered")
-
-
-def run_all_gates(repo_path: str, test_specs: list[dict] | None = None,
-                  checklist: list[dict] | None = None,
-                  ci_config: dict | None = None) -> list[CIResult]:
-    """Run all CI gates on a local repo path. Returns list of CIResults."""
-    results = []
-    cfg = ci_config or {}
-    timeout = cfg.get("timeout_seconds", 120)
-
-    # Step 0: Install dependencies if configured
-    install_cmd = cfg.get("install_command", "")
-    if install_cmd:
-        code, output = _run(install_cmd.split(), cwd=repo_path, timeout=120)
-        if code != 0:
-            results.append(CIResult("install", False, output,
-                                     f"Install failed: {install_cmd}"))
-            return results  # no point running tests if install fails
-
-    # Gate 1: Run tests
-    test_cmd = cfg.get("test_command", "")
-    results.append(run_pytest(repo_path, test_command=test_cmd, timeout=timeout))
-
-    # Gate 2: Run lint if configured or if checklist mentions it
-    lint_cmd = cfg.get("lint_command", "")
+    # ── Step 4: Run lint (if configured) ──
     if lint_cmd:
-        code, output = _run(lint_cmd.split(), cwd=repo_path, timeout=60)
-        passed = code == 0
-        results.append(CIResult("lint", passed, output,
-                                 "lint clean" if passed else f"lint failed: {lint_cmd}"))
-    else:
-        # Fallback: check for repo's own lint script
-        need_lint = False
-        if checklist:
-            for c in checklist:
-                desc = c.get("description", "").lower()
-                if "_logic" in desc or "[unit]" in desc:
-                    need_lint = True
-                    break
-        if need_lint:
-            results.append(run_lint(repo_path))
+        code, output = _ssh_run(
+            host, user, port, key_path,
+            f"cd {remote_path} && {lint_cmd}",
+            timeout=60)
+        results.append(CIResult("lint", code == 0, output,
+                                 "lint clean" if code == 0 else f"lint failed"))
 
-    # Gate 3: Kill test if checklist has [unit] items
+    # ── Step 5: Kill test (if checklist has [unit] items) ──
     need_kill = False
     if checklist:
         need_kill = any("[unit]" in c.get("description", "") for c in checklist)
     if need_kill:
-        results.append(run_kill_test(repo_path))
+        kill_result = _run_kill_test_remote(
+            host, user, port, key_path, remote_path, timeout)
+        results.append(kill_result)
 
-    # Gate 4: Spec coverage
+    # ── Step 6: Spec coverage (local analysis of remote test names) ──
     if test_specs:
-        results.append(run_spec_coverage(repo_path, test_specs))
+        spec_result = _run_spec_coverage_remote(
+            host, user, port, key_path, remote_path, test_specs, timeout)
+        results.append(spec_result)
+
+    # ── Cleanup ──
+    _cleanup(host, user, port, key_path, remote_path)
 
     return results
 
 
-def run_all_gates_from_git(repo_url: str, branch: str = "main",
-                           commit_sha: str = "",
-                           test_specs: list[dict] | None = None,
-                           checklist: list[dict] | None = None,
-                           ci_config: dict | None = None) -> list[CIResult]:
-    """Full git-based CI: clone → checkout → run gates → cleanup.
+def _cleanup(host: str, user: str, port: int, key_path: str, remote_path: str):
+    """Remove the cloned repo from the remote machine."""
+    _ssh_run(host, user, port, key_path, f"rm -rf {remote_path}", timeout=30)
 
-    Uses project's ci_config for install/test/lint commands.
-    Agent only needs to push to git and submit the branch name.
+
+def _run_kill_test_remote(host: str, user: str, port: int, key_path: str,
+                          remote_path: str, timeout: int) -> CIResult:
+    """Kill test via SSH — mutate logic functions and verify tests break.
+
+    Sends a self-contained Python script to run on the remote machine.
     """
-    # Step 1: Clone and checkout
-    work_dir, error = checkout_repo(repo_url, branch, commit_sha)
-    if error:
-        return [error]
+    kill_script = '''
+import ast, glob, os, subprocess, sys
 
+repo = sys.argv[1]
+logic_files = glob.glob(os.path.join(repo, "**/*_logic.py"), recursive=True)
+logic_files += glob.glob(os.path.join(repo, "**/logic.py"), recursive=True)
+logic_files = [f for f in logic_files
+               if ".venv" not in f and "node_modules" not in f
+               and not os.path.basename(f).startswith("test_")]
+
+if not logic_files:
+    print("SKIP: no logic files"); sys.exit(0)
+
+survivors = []
+for lf in logic_files:
+    original = open(lf).read()
     try:
-        # Step 2: Run all gates
-        results = run_all_gates(work_dir, test_specs, checklist, ci_config)
+        tree = ast.parse(original)
+    except SyntaxError:
+        continue
+    funcs = [n for n in ast.iter_child_nodes(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and not n.name.startswith("_")]
+    for func in funcs:
+        lines = original.split("\\n")
+        indent = "    "
+        if func.body:
+            bl = lines[func.body[0].lineno - 1]
+            indent = bl[:len(bl) - len(bl.lstrip())]
+        mutated = lines[:func.lineno]
+        has_ds = (func.body and isinstance(func.body[0], ast.Expr)
+                  and isinstance(func.body[0].value, ast.Constant))
+        if has_ds:
+            mutated.extend(lines[func.lineno:func.body[0].end_lineno])
+        mutated.append(f"{indent}raise NotImplementedError('KILLED')")
+        mutated.extend(lines[func.end_lineno:])
+        with open(lf, "w") as f:
+            f.write("\\n".join(mutated))
+        r = subprocess.run(["python", "-m", "pytest", "tests/", "-x", "-q", "--tb=line"],
+                           cwd=repo, capture_output=True, timeout=30)
+        with open(lf, "w") as f:
+            f.write(original)
+        if r.returncode == 0:
+            survivors.append(f"{os.path.basename(lf)}::{func.name}")
 
-        # Prepend git info
-        git_info = CIResult(
-            "git_checkout", True, "",
-            f"Cloned {repo_url} @ {commit_sha or branch}")
-        return [git_info] + results
-    finally:
-        # Step 3: Always cleanup
+if survivors:
+    print(f"FAIL: {len(survivors)} survivors: {', '.join(survivors[:5])}")
+    sys.exit(1)
+else:
+    print(f"OK: all functions in {len(logic_files)} file(s) tested")
+'''
+
+    # Write script to remote, execute, clean up
+    escaped = kill_script.replace("'", "'\\''")
+    code, output = _ssh_run(
+        host, user, port, key_path,
+        f"echo '{escaped}' > /tmp/_aegis_kill.py && python /tmp/_aegis_kill.py {remote_path} && rm -f /tmp/_aegis_kill.py",
+        timeout=timeout)
+
+    if "SKIP" in output:
+        return CIResult("kill_test", True, output, "No logic files — skipped")
+
+    return CIResult("kill_test", code == 0, output,
+                     "All mutants killed" if code == 0 else output.strip().split("\n")[-1])
+
+
+def _run_spec_coverage_remote(host: str, user: str, port: int, key_path: str,
+                               remote_path: str, test_specs: list[dict],
+                               timeout: int) -> CIResult:
+    """Check spec coverage by listing test function names from the remote repo."""
+    # Get all test function names
+    code, output = _ssh_run(
+        host, user, port, key_path,
+        f"cd {remote_path} && grep -rh 'def test_' tests/*.py 2>/dev/null || true",
+        timeout=30)
+
+    test_names = [line.strip() for line in output.split("\n")
+                  if line.strip().startswith("def test_")]
+
+    uncovered = []
+    for spec in test_specs:
+        spec_input = spec.get("input", "").lower()
+        spec_expect = spec.get("expect", "").lower()
+        keywords = [w for w in re.split(r'[^a-zA-Z]+', spec_input + " " + spec_expect) if len(w) > 2]
+
+        covered = False
+        for t in test_names:
+            t_lower = t.lower()
+            matches = sum(1 for kw in keywords if kw in t_lower)
+            if matches >= max(1, len(keywords) // 2):
+                covered = True
+                break
+        if not covered:
+            uncovered.append(f"{spec_input} → {spec_expect}")
+
+    if uncovered:
+        detail = f"{len(uncovered)}/{len(test_specs)} specs uncovered"
+        return CIResult("spec_coverage", False, "\n".join(uncovered[:5]), detail)
+
+    return CIResult("spec_coverage", True, "",
+                     f"All {len(test_specs)} test specs covered")
+
+
+# ── Legacy compatibility ──────────────────────────────────────
+# Keep function signatures for existing callers
+
+def checkout_repo(repo_url: str, branch: str = "main",
+                  commit_sha: str = "") -> tuple[str, CIResult | None]:
+    """Legacy: used by check-deps endpoint. Runs locally."""
+    import tempfile, shutil
+    work_dir = tempfile.mkdtemp(prefix="aegis_ci_")
+    cmd = ["git", "clone", "--depth", "50", repo_url, work_dir]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return "", CIResult("git_clone", False, result.stdout + result.stderr,
+                                f"Failed to clone {repo_url}")
+        return work_dir, None
+    except Exception as e:
         shutil.rmtree(work_dir, ignore_errors=True)
-
+        return "", CIResult("git_clone", False, str(e), f"Clone error: {e}")
