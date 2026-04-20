@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aegis — Engineering Governance Dashboard</title>
+  <meta name="description" content="Aegis centralized engineering governance platform dashboard">
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-logo">
+          <div class="logo-icon">A</div>
+          <div>
+            <div class="logo-text">Aegis</div>
+            <div class="logo-version">v1.0.0</div>
+          </div>
+        </div>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <div class="nav-item active" data-section="overview">
+          <span class="icon">📊</span><span>Overview</span>
+        </div>
+        <div class="nav-item" data-section="tickets">
+          <span class="icon">🎫</span><span>Tickets</span>
+          <span class="nav-badge" id="nav-ticket-count">0</span>
+        </div>
+        <div class="nav-item" data-section="agents">
+          <span class="icon">🤖</span><span>Agents</span>
+          <span class="nav-badge" id="nav-agent-count">0</span>
+        </div>
+        <div class="nav-item" data-section="projects">
+          <span class="icon">📦</span><span>Projects</span>
+        </div>
+        <div class="nav-item" data-section="events">
+          <span class="icon">📜</span><span>Event Log</span>
+        </div>
+        <div class="nav-item" data-section="deploy">
+          <span class="icon">🚀</span><span>Deploy</span>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="server-status">
+          <div class="status-dot" id="server-dot"></div>
+          <span id="server-status-text">Connecting...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- ── Overview ──────────────────────────────────── -->
+      <div class="section active" id="section-overview">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Overview</div>
+            <div class="page-subtitle">Engineering governance at a glance</div>
+          </div>
+          <div class="header-actions">
+            <button class="btn" onclick="refreshAll()">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="page-content">
+          <div class="metric-grid" id="overview-metrics"></div>
+          <h3 style="font-size:15px;font-weight:600;margin-bottom:16px;color:var(--text-secondary)">DORA Metrics</h3>
+          <div class="metric-grid" id="dora-metrics"></div>
+          <h3 style="font-size:15px;font-weight:600;margin:24px 0 16px;color:var(--text-secondary)">Ticket Distribution</h3>
+          <div class="metric-grid" id="phase-distribution"></div>
+          <h3 style="font-size:15px;font-weight:600;margin:24px 0 16px;color:var(--text-secondary)">Recent Activity</h3>
+          <div class="timeline" id="overview-timeline"></div>
+        </div>
+      </div>
+
+      <!-- ── Tickets ───────────────────────────────────── -->
+      <div class="section" id="section-tickets">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Tickets</div>
+            <div class="page-subtitle">Lifecycle kanban board</div>
+          </div>
+          <div class="header-actions">
+            <select id="ticket-project-filter" class="btn" onchange="loadTickets()">
+              <option value="">All Projects</option>
+            </select>
+            <button class="btn btn-primary" onclick="showCreateTicket()">+ Create Ticket</button>
+          </div>
+        </div>
+        <div class="page-content">
+          <div class="kanban" id="ticket-kanban"></div>
+        </div>
+      </div>
+
+      <!-- ── Agents ────────────────────────────────────── -->
+      <div class="section" id="section-agents">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Agents</div>
+            <div class="page-subtitle">Team members and AI agents</div>
+          </div>
+        </div>
+        <div class="page-content">
+          <div class="agent-grid" id="agent-grid"></div>
+        </div>
+      </div>
+
+      <!-- ── Projects ──────────────────────────────────── -->
+      <div class="section" id="section-projects">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Projects</div>
+            <div class="page-subtitle">Managed projects and environments</div>
+          </div>
+        </div>
+        <div class="page-content" id="projects-content"></div>
+      </div>
+
+      <!-- ── Events ────────────────────────────────────── -->
+      <div class="section" id="section-events">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Event Log</div>
+            <div class="page-subtitle">Full audit trail</div>
+          </div>
+          <div class="header-actions">
+            <input type="text" id="event-filter-ticket" placeholder="Filter by ticket..." class="btn" style="min-width:180px" oninput="loadEvents()">
+          </div>
+        </div>
+        <div class="page-content">
+          <div class="timeline" id="event-timeline"></div>
+        </div>
+      </div>
+
+      <!-- ── Deploy ────────────────────────────────────── -->
+      <div class="section" id="section-deploy">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Environments</div>
+            <div class="page-subtitle">Infrastructure and deployment</div>
+          </div>
+        </div>
+        <div class="page-content">
+          <div id="deploy-content"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+    <div class="modal" id="modal-body"></div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

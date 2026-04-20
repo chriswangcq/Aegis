@@ -1,7 +1,10 @@
 """Aegis — AI-native engineering governance platform."""
 import json, logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import uvicorn
 from .db import get_db, init_schema, seed_roles, now_ms, log_event, PHASE_ROLE, SUBMIT_NEXT, VALID_PHASES
 from .models import *
@@ -47,6 +50,14 @@ async def lifespan(app):
     _conn.close()
 
 app = FastAPI(title="Aegis", description="AI-native engineering governance platform", version="1.0.0", lifespan=lifespan)
+
+_dashboard_dir = Path(__file__).parent.parent / "dashboard"
+if _dashboard_dir.exists():
+    app.mount("/dashboard", StaticFiles(directory=str(_dashboard_dir)), name="dashboard")
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    return FileResponse(str(_dashboard_dir / "index.html"))
 
 @app.get("/status")
 def health():
@@ -151,8 +162,9 @@ def list_agents():
     agents = []
     for a in db().execute("SELECT * FROM agents ORDER BY id").fetchall():
         d = row_to_dict(a)
-        certs = db().execute("SELECT role_id, status, score FROM certifications WHERE agent_id=? AND status='passed'", (a["id"],)).fetchall()
-        d["certified_roles"] = [{"role": c["role_id"], "score": c["score"]} for c in certs]
+        certs = db().execute("SELECT * FROM certifications WHERE agent_id=?", (a["id"],)).fetchall()
+        d["certifications"] = [_pj(row_to_dict(c)) for c in certs]
+        d["certified_roles"] = [{"role": c["role_id"], "score": c["score"]} for c in certs if c["status"] == "passed"]
         agents.append(d)
     return {"agents": agents}
 
