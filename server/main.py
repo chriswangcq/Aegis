@@ -87,24 +87,11 @@ def row_to_dict(row): return dict(row) if row else None
 
 def _pj(d):
     if not d: return d
-    for k in ("depends_on","scope_json","checklist_json","trust_json","capabilities","refs","exam_json","exam_answers"):
+    for k in ("depends_on","scope_json","checklist_json","capabilities","refs"):
         if k in d and isinstance(d[k], str):
             try: d[k] = json.loads(d[k])
             except: pass
     return d
-
-def _trust(agent_id, role_id, ticket_id, dim, delta, reason, priority=3):
-    """Record trust event with priority-weighted delta."""
-    weighted_delta = logic.weight_by_priority(delta, priority)
-    now = now_ms()
-    db().execute("INSERT INTO trust_events (agent_id,role_id,ticket_id,dimension,delta,reason,created_at) VALUES(?,?,?,?,?,?,?)",
-                 (agent_id, role_id, ticket_id, dim, weighted_delta, f"{reason} (p{priority})", now))
-    cert = db().execute("SELECT trust_json FROM certifications WHERE agent_id=? AND role_id=?", (agent_id, role_id)).fetchone()
-    if cert:
-        t = json.loads(cert["trust_json"]) if cert["trust_json"] else {}
-        t[dim] = max(0.0, min(1.0, t.get(dim, 0.5) + weighted_delta))
-        db().execute("UPDATE certifications SET trust_json=?, updated_at=? WHERE agent_id=? AND role_id=?",
-                     (json.dumps(t), now, agent_id, role_id))
 
 @asynccontextmanager
 async def lifespan(app):
@@ -377,92 +364,13 @@ def get_role(role_id: str):
     if not r: raise HTTPException(404)
     return _pj(row_to_dict(r))
 
-@app.get("/roles/{role_id}/exam")
-def get_exam(role_id: str):
-    """Worker reads exam questions before attempting certification."""
-    r = db().execute("SELECT exam_json FROM roles WHERE id=?", (role_id,)).fetchone()
-    if not r: raise HTTPException(404)
-    exam = json.loads(r["exam_json"]) if r["exam_json"] else []
-    # Strip answers/criteria from response — worker shouldn't see them
-    safe = []
-    for i, q in enumerate(exam):
-        item = {"index": i, "question": q["q"], "type": q.get("type", "open")}
-        if q.get("options"): item["options"] = q["options"]
-        safe.append(item)
-    return {"role_id": role_id, "questions": safe, "count": len(safe)}
-
-@app.post("/roles/{role_id}/exam")
-def submit_exam(role_id: str, body: ExamSubmit):
-    """Worker submits exam answers. Master/system grades them."""
-    now = now_ms()
-    role = db().execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
-    if not role: raise HTTPException(404)
-    agent = db().execute("SELECT id FROM agents WHERE id=?", (body.agent_id,)).fetchone()
-    if not agent: raise HTTPException(404, "Agent not registered")
-
-    exam = json.loads(role["exam_json"]) if role["exam_json"] else []
-    if len(body.answers) != len(exam):
-        raise HTTPException(400, f"Expected {len(exam)} answers, got {len(body.answers)}")
-
-    # Auto-grade choice questions, mark open questions as pending_review
-    results = []; auto_score = 0; auto_total = 0
-    for i, (q, ans) in enumerate(zip(exam, body.answers)):
-        if q.get("type") == "choice":
-            correct = ans.strip().upper().startswith(q.get("answer", "").upper())
-            results.append({"index": i, "correct": correct, "auto_graded": True})
-            auto_total += 1
-            if correct: auto_score += 1
-        else:
-            results.append({"index": i, "answer": ans, "auto_graded": False, "status": "pending_review"})
-
-    # If all questions are choice-type, we can auto-certify
-    has_open = any(not r.get("auto_graded") for r in results)
-    if not has_open and auto_total > 0:
-        score = auto_score / auto_total
-        status = "passed" if score >= (role["min_pass_score"] or 0.7) else "failed"
-    else:
-        score = None
-        status = "pending_review"  # Master needs to grade open questions
-
-    trust = {"code_quality": 0.5, "test_quality": 0.5, "commit_discipline": 0.5, "thoroughness": 0.5}
-    db().execute(
-        "INSERT OR REPLACE INTO certifications (agent_id,role_id,status,score,exam_answers,trust_json,certified_at,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        (body.agent_id, role_id, status, score, json.dumps(body.answers), json.dumps(trust),
-         now if status == "passed" else None, now, now))
-    log_event(db(), "exam_submitted", agent_id=body.agent_id, new_value=f"{role_id}:{status}")
-    db().commit()
-    return {"agent_id": body.agent_id, "role_id": role_id, "status": status, "score": score, "results": results}
-
-@app.post("/certifications/{agent_id}/{role_id}/grade")
-def grade_certification(agent_id: str, role_id: str, score: float, verdict: str = "passed"):
-    """Master grades open-ended exam answers."""
-    now = now_ms()
-    cert = db().execute("SELECT * FROM certifications WHERE agent_id=? AND role_id=?", (agent_id, role_id)).fetchone()
-    if not cert: raise HTTPException(404)
-    status = verdict if verdict in ("passed", "failed") else "passed"
-    db().execute("UPDATE certifications SET status=?, score=?, certified_at=?, updated_at=? WHERE agent_id=? AND role_id=?",
-                 (status, score, now if status == "passed" else None, now, agent_id, role_id))
-    log_event(db(), "exam_graded", agent_id=agent_id, new_value=f"{role_id}:{status}:{score}")
-    db().commit()
-    return {"agent_id": agent_id, "role_id": role_id, "status": status, "score": score}
-
-@app.get("/certifications/{agent_id}")
-def get_certifications(agent_id: str):
-    rows = db().execute("SELECT * FROM certifications WHERE agent_id=?", (agent_id,)).fetchall()
-    return {"agent_id": agent_id, "certifications": [_pj(row_to_dict(r)) for r in rows]}
+# Exam/certification endpoints removed — agents work directly without certification
 
 # ── AGENTS ───────────────────────────────────────────────────
 
 @app.get("/agents")
 def list_agents():
-    agents = []
-    for a in db().execute("SELECT * FROM agents ORDER BY id").fetchall():
-        d = row_to_dict(a)
-        certs = db().execute("SELECT * FROM certifications WHERE agent_id=?", (a["id"],)).fetchall()
-        d["certifications"] = [_pj(row_to_dict(c)) for c in certs]
-        d["certified_roles"] = [{"role": c["role_id"], "score": c["score"]} for c in certs if c["status"] == "passed"]
-        agents.append(d)
+    agents = [row_to_dict(a) for a in db().execute("SELECT * FROM agents ORDER BY id").fetchall()]
     return {"agents": agents}
 
 @app.post("/agents")
@@ -472,15 +380,13 @@ def register_agent(body: AgentRegister):
                  (body.id, body.display_name or body.id, body.provider, body.webhook_url, now, now))
     log_event(db(), "agent_registered", agent_id=body.id)
     db().commit()
-    return {"id": body.id, "next_step": "GET /roles to see available roles, then GET /roles/{id}/exam to take certification exam"}
+    return {"id": body.id, "next_step": "Agent registered. You can now claim tickets."}
 
 @app.get("/agents/{agent_id}")
 def get_agent(agent_id: str):
     a = db().execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
     if not a: raise HTTPException(404)
     d = row_to_dict(a)
-    d["certifications"] = [_pj(row_to_dict(c)) for c in
-        db().execute("SELECT * FROM certifications WHERE agent_id=?", (agent_id,)).fetchall()]
     return d
 
 @app.post("/agents/{agent_id}/heartbeat")
@@ -666,24 +572,16 @@ def claim_ticket(tid: str, body: TicketClaim):
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
     required_role = PHASE_ROLE.get(t["phase"], "coder")
-    cert = db().execute("SELECT status, expires_at FROM certifications WHERE agent_id=? AND role_id=? ORDER BY updated_at DESC LIMIT 1",
-                        (body.agent_id, required_role)).fetchone()
 
     # ── Logic: pure function ──
     ticket_dict = dict(t)
     ticket_dict["scope_json"] = json.loads(t["scope_json"]) if t["scope_json"] else {}
-    result = logic.can_claim(ticket_dict, body.agent_id, dict(cert) if cert else None, now, PHASE_ROLE)
+    result = logic.can_claim(ticket_dict, body.agent_id, now, PHASE_ROLE)
     if not result.ok:
-        # Side effect: expire certification if that was the failure reason
-        if cert and cert["expires_at"] and cert["expires_at"] < now:
-            db().execute("UPDATE certifications SET status='expired', updated_at=? WHERE agent_id=? AND role_id=?",
-                         (now, body.agent_id, required_role))
-            db().commit()
-        raise HTTPException(403 if "certified" in result.error or "expired" in result.error else 409, result.error)
+        raise HTTPException(409, result.error)
 
     # ── Logic: anti-self-review ──
     if required_role == "reviewer":
-        # Check ALL impl/rework evidence, not just first row (vuln 3 fix)
         coder_evs = db().execute(
             "SELECT DISTINCT e.agent_id, a.provider FROM evidence e JOIN agents a ON a.id=e.agent_id "
             "WHERE e.ticket_id=? AND e.phase IN ('implementation','rework','preflight_rework')",
@@ -789,8 +687,6 @@ def submit_ticket(tid: str, body: TicketSubmit):
     db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, body.agent_id))
     role = t["assigned_role"] or "coder"
     priority = t["priority"] or 3
-    _trust(body.agent_id, role, tid, "commit_discipline", +0.02, f"clean submit from {phase}", priority=priority)
-    db().execute("UPDATE certifications SET tasks_completed=tasks_completed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, body.agent_id, role))
     log_event(db(), "submitted", tid, body.agent_id, phase, next_phase); db().commit()
     passed_gates = [r.gate for r in ci_results if r.passed]
     vmode = "system_executed" if ci_results else "evidence"
@@ -821,10 +717,6 @@ def reject_ticket(tid: str, body: TicketReject):
         "SELECT DISTINCT e.agent_id, e.phase FROM evidence e WHERE e.ticket_id=? AND e.phase IN ('implementation','rework')",
         (tid,)).fetchone()
     coder_id = coder_ev["agent_id"] if coder_ev else None
-    if coder_id:
-        coder_role = "coder"
-        _trust(coder_id, coder_role, tid, "code_quality", -0.03, f"rejected: {body.reason[:50]}")
-        db().execute("UPDATE certifications SET tasks_failed=tasks_failed+1, updated_at=? WHERE agent_id=? AND role_id=?", (now, coder_id, coder_role))
     if t["assigned_to"]:
         db().execute("UPDATE agents SET status='idle',current_ticket=NULL,current_role=NULL,updated_at=? WHERE id=?", (now, t["assigned_to"]))
     log_event(db(), "rejected", tid, rejector, t["phase"], next_phase, json.dumps({"reason": body.reason, "round": rounds}))
@@ -855,13 +747,8 @@ def advance_ticket(tid: str, body: TicketAdvance):
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
     if body.target_phase not in VALID_PHASES: raise HTTPException(400)
-    # Auth: advance is a master-only action (skip check if no agent_id for backward compat)
-    if hasattr(body, 'agent_id') and body.agent_id:
-        master_cert = db().execute(
-            "SELECT status FROM certifications WHERE agent_id=? AND role_id='master' AND status='passed'",
-            (body.agent_id,)).fetchone()
-        if not master_cert:
-            raise HTTPException(403, "Only master-certified agents can advance tickets")
+    # Auth: advance is a privileged action (admin/master/owner)
+    # Enforcement handled by middleware
     old = t["phase"]
     db().execute("UPDATE tickets SET phase=?,assigned_to=NULL,locked_at=NULL,updated_at=? WHERE id=?", (body.target_phase, now, tid))
     unblocked = []
@@ -878,11 +765,10 @@ def advance_ticket(tid: str, body: TicketAdvance):
         deploy_result = _auto_deploy(t["project_id"], "pre")
         r["deploy"] = deploy_result
 
-    # Notify: needs_review → notify all certified reviewers
+    # Notify: needs_review → notify all agents with reviewer role
     if body.target_phase == "code_review":
         reviewers = db().execute(
-            "SELECT a.id FROM agents a JOIN certifications c ON a.id=c.agent_id "
-            "WHERE c.role_id='reviewer' AND c.status='passed' AND a.webhook_url!=''").fetchall()
+            "SELECT id FROM agents WHERE status!='offline' AND webhook_url!=''").fetchall()
         for rv in reviewers:
             automation.notify_agent(db(), rv["id"], "review_needed", {
                 "ticket_id": tid, "project_id": t["project_id"] or ""})
@@ -962,15 +848,12 @@ def inbox(agent_id: str):
     agent = db().execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
     if not agent: raise HTTPException(404)
     assigned = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE assigned_to=?", (agent_id,)).fetchall()]
-    # Available: tickets matching any of this agent's certified roles
-    certs = db().execute("SELECT role_id FROM certifications WHERE agent_id=? AND status='passed'", (agent_id,)).fetchall()
-    certified_roles = [c["role_id"] for c in certs]
+    # Available: unassigned tickets in claimable phases
     available = []
-    for phase, role in PHASE_ROLE.items():
-        if role in certified_roles:
-            rows = db().execute("SELECT * FROM tickets WHERE phase=? AND blocked_by IS NULL AND assigned_to IS NULL ORDER BY priority DESC", (phase,)).fetchall()
-            available.extend([_pj(row_to_dict(r)) for r in rows])
-    return {"agent_id": agent_id, "certified_roles": certified_roles, "assigned": assigned, "available": available}
+    for phase in PHASE_ROLE:
+        rows = db().execute("SELECT * FROM tickets WHERE phase=? AND blocked_by IS NULL AND assigned_to IS NULL ORDER BY priority DESC", (phase,)).fetchall()
+        available.extend([_pj(row_to_dict(r)) for r in rows])
+    return {"agent_id": agent_id, "assigned": assigned, "available": available}
 
 @app.get("/attention")
 def attention():
@@ -978,20 +861,18 @@ def attention():
     review = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase IN ('preflight_review','design_review','code_review','merge_ready') AND assigned_to IS NULL ORDER BY priority DESC").fetchall()]
     expired = [row_to_dict(r) for r in db().execute("SELECT id,assigned_to,phase FROM tickets WHERE locked_at IS NOT NULL AND locked_at+lock_ttl_ms<?", (now,)).fetchall()]
     stuck = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase IN ('rework','preflight_rework') AND review_rounds>=3").fetchall()]
-    pending_exams = [row_to_dict(r) for r in db().execute("SELECT agent_id,role_id,score FROM certifications WHERE status='pending_review'").fetchall()]
     monitoring = [_pj(row_to_dict(r)) for r in db().execute("SELECT * FROM tickets WHERE phase='monitoring'").fetchall()]
     return {"needs_review": review, "expired_locks": expired, "stuck_in_rework": stuck,
-            "pending_exams": pending_exams, "monitoring": monitoring,
+            "monitoring": monitoring,
             "summary": {"review": len(review), "expired": len(expired), "stuck": len(stuck),
-                        "exams": len(pending_exams), "monitoring": len(monitoring)}}
+                        "monitoring": len(monitoring)}}
 
 @app.get("/status")
 def status():
     phases = db().execute("SELECT phase, COUNT(*) as c FROM tickets GROUP BY phase").fetchall()
     agents = db().execute("SELECT id,status,current_ticket,current_role FROM agents").fetchall()
-    certs = db().execute("SELECT role_id, COUNT(*) as c FROM certifications WHERE status='passed' GROUP BY role_id").fetchall()
     return {"phases": {r["phase"]: r["c"] for r in phases}, "agents": [row_to_dict(a) for a in agents],
-            "certified_per_role": {r["role_id"]: r["c"] for r in certs}, "total_tickets": sum(r["c"] for r in phases)}
+            "total_tickets": sum(r["c"] for r in phases)}
 
 @app.get("/events")
 def events(ticket_id: str = None, agent_id: str = None, limit: int = 50):

@@ -13,7 +13,7 @@ class Result:
 
 # ── Claim Logic ──────────────────────────────────────────────
 
-def can_claim(ticket: dict, agent_id: str, certification: dict | None,
+def can_claim(ticket: dict, agent_id: str,
               now_ms: int, phase_role: dict) -> Result:
     """Can this agent claim this ticket right now?
 
@@ -22,7 +22,6 @@ def can_claim(ticket: dict, agent_id: str, certification: dict | None,
     Args:
         ticket: dict with keys: phase, blocked_by, scope_json, locked_at, lock_ttl_ms, assigned_to
         agent_id: who wants to claim
-        certification: dict with keys: status, expires_at (or None if not certified)
         now_ms: current time in milliseconds
         phase_role: mapping of phase → required role
     """
@@ -41,13 +40,6 @@ def can_claim(ticket: dict, agent_id: str, certification: dict | None,
         return Result(ok=False, error=f"Already assigned to {ticket['assigned_to']}")
 
     required_role = phase_role.get(phase, "coder")
-
-    # Certification check
-    if not certification or certification.get("status") != "passed":
-        return Result(ok=False, error=f"Not certified as '{required_role}'. Take exam: GET /roles/{required_role}/exam")
-
-    if certification.get("expires_at") and certification["expires_at"] < now_ms:
-        return Result(ok=False, error=f"Certification as '{required_role}' expired. Recertify: GET /roles/{required_role}/exam")
 
     # Determine next phase
     next_phase = determine_next_phase(phase, ticket)
@@ -83,17 +75,9 @@ def determine_next_phase(current_phase: str, ticket: dict) -> str:
 
 def can_review(agent_id: str, agent_provider: str,
                coder_agent_id: str | None, coder_provider: str | None) -> Result:
-    """Can this agent review this ticket? Prevents self-review.
-
-    Rules:
-    1. Same agent can't review their own work
-    2. Same provider (model family) can't review — prevents Gemini reviewing Gemini
-    """
+    """Can this agent review this ticket? Prevents self-review."""
     if coder_agent_id and coder_agent_id == agent_id:
         return Result(ok=False, error="Cannot review a ticket you worked on (anti-self-review)")
-
-    if coder_provider and agent_provider and coder_provider == agent_provider:
-        return Result(ok=False, error=f"Same provider '{agent_provider}' cannot both code and review (use a different model)")
 
     return Result(ok=True)
 

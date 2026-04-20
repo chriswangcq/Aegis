@@ -13,55 +13,33 @@ from server.db import PHASE_ROLE
 
 def test_blocked_ticket_not_claimable():
     t = {"phase": "ready", "blocked_by": "PR-17"}
-    r = can_claim(t, "w1", {"status": "passed"}, 1000, PHASE_ROLE)
+    r = can_claim(t, "w1", 1000, PHASE_ROLE)
     assert not r.ok
     assert "Blocked" in r.error
 
-def test_uncertified_agent_rejected():
+def test_ready_ticket_claimable():
     t = {"phase": "ready", "blocked_by": None}
-    r = can_claim(t, "w1", None, 1000, PHASE_ROLE)
-    assert not r.ok
-    assert "Not certified" in r.error
-
-def test_failed_cert_rejected():
-    t = {"phase": "ready", "blocked_by": None}
-    r = can_claim(t, "w1", {"status": "failed"}, 1000, PHASE_ROLE)
-    assert not r.ok
-
-def test_expired_cert_rejected():
-    t = {"phase": "ready", "blocked_by": None}
-    cert = {"status": "passed", "expires_at": 500}
-    r = can_claim(t, "w1", cert, 1000, PHASE_ROLE)
-    assert not r.ok
-    assert "expired" in r.error.lower()
-
-def test_valid_cert_no_expiry():
-    t = {"phase": "ready", "blocked_by": None}
-    cert = {"status": "passed", "expires_at": None}
-    r = can_claim(t, "w1", cert, 1000, PHASE_ROLE)
+    r = can_claim(t, "w1", 1000, PHASE_ROLE)
     assert r.ok
     assert r.data["role"] == "coder"
     assert r.data["next_phase"] == "preflight"
 
 def test_non_claimable_phase():
     t = {"phase": "planning", "blocked_by": None}
-    cert = {"status": "passed"}
-    r = can_claim(t, "w1", cert, 1000, PHASE_ROLE)
+    r = can_claim(t, "w1", 1000, PHASE_ROLE)
     assert not r.ok
     assert "not claimable" in r.error
 
 def test_expired_lock_allows_reclaim():
     t = {"phase": "implementation", "blocked_by": None, "assigned_to": "w-old",
          "locked_at": 100, "lock_ttl_ms": 300}
-    cert = {"status": "passed"}
-    r = can_claim(t, "w1", cert, 1000, PHASE_ROLE)  # 1000 > 100+300
+    r = can_claim(t, "w1", 1000, PHASE_ROLE)  # 1000 > 100+300
     assert r.ok
 
 def test_active_lock_blocks_claim():
     t = {"phase": "implementation", "blocked_by": None, "assigned_to": "w-old",
          "locked_at": 900, "lock_ttl_ms": 300000}
-    cert = {"status": "passed"}
-    r = can_claim(t, "w1", cert, 1000, PHASE_ROLE)
+    r = can_claim(t, "w1", 1000, PHASE_ROLE)
     assert not r.ok
     assert "assigned" in r.error.lower()
 
@@ -92,10 +70,10 @@ def test_self_review_blocked():
     assert not r.ok
     assert "anti-self-review" in r.error
 
-def test_same_provider_blocked():
+def test_same_provider_allowed():
+    """Cross-provider check removed — same provider is now allowed."""
     r = can_review("r1", "gemini", "w1", "gemini")
-    assert not r.ok
-    assert "Same provider" in r.error
+    assert r.ok
 
 def test_different_provider_allowed():
     r = can_review("r1", "claude", "w1", "gemini")
