@@ -258,10 +258,63 @@ def init_schema(conn: sqlite3.Connection):
         id             TEXT PRIMARY KEY,
         project_id     TEXT REFERENCES projects(id),
         agent_id       TEXT DEFAULT '',
+        user_id        TEXT DEFAULT '',
         role           TEXT DEFAULT 'agent',
         created_at     INTEGER,
         revoked_at     INTEGER
     );
+
+    -- ── Users (individual accounts) ─────────────────────
+    CREATE TABLE IF NOT EXISTS users (
+        id             TEXT PRIMARY KEY,
+        display_name   TEXT DEFAULT '',
+        email          TEXT DEFAULT '',
+        api_key        TEXT UNIQUE NOT NULL,
+        role           TEXT DEFAULT 'member',
+        created_at     INTEGER,
+        last_login_at  INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key);
+
+    -- ── Project Members (who has access to what) ────────
+    CREATE TABLE IF NOT EXISTS project_members (
+        project_id     TEXT REFERENCES projects(id),
+        user_id        TEXT REFERENCES users(id),
+        role           TEXT DEFAULT 'member',
+        invited_by     TEXT DEFAULT '',
+        joined_at      INTEGER,
+        PRIMARY KEY (project_id, user_id)
+    );
+
+    -- ── Join Requests (approval-based) ────────────────
+    CREATE TABLE IF NOT EXISTS join_requests (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id     TEXT REFERENCES projects(id),
+        user_id        TEXT REFERENCES users(id),
+        role           TEXT DEFAULT 'member',
+        message        TEXT DEFAULT '',
+        status         TEXT DEFAULT 'pending',
+        reviewed_by    TEXT DEFAULT '',
+        review_note    TEXT DEFAULT '',
+        created_at     INTEGER,
+        reviewed_at    INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_join_requests_project ON join_requests(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_join_requests_user ON join_requests(user_id, status);
+
+    -- ── Notifications (message center) ──────────────
+    CREATE TABLE IF NOT EXISTS notifications (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id        TEXT NOT NULL,
+        type           TEXT NOT NULL,
+        title          TEXT NOT NULL,
+        body           TEXT DEFAULT '',
+        ref_type       TEXT DEFAULT '',
+        ref_id         TEXT DEFAULT '',
+        is_read        INTEGER DEFAULT 0,
+        created_at     INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);
 
     -- ── CI Jobs ──────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS ci_jobs (

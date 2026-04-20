@@ -27,7 +27,7 @@ AUTH_MODE = os.environ.get("AEGIS_AUTH", "enforced")
 PUBLIC_PATHS = frozenset({
     "/", "/status", "/docs", "/openapi.json", "/redoc",
     "/dashboard/style.css", "/dashboard/app.js", "/dashboard/index.html",
-    "/api/login",
+    "/api/login", "/api/register",
 })
 
 def _is_public(path: str) -> bool:
@@ -140,11 +140,171 @@ def login(body: dict):
     if not key:
         raise HTTPException(401, "API key required")
     if ADMIN_KEY and key == ADMIN_KEY:
-        return {"role": "admin", "project_id": "*", "agent_id": "admin"}
+        return {"role": "admin", "project_id": "*", "user_id": "admin"}
     ctx = auth_module.validate_api_key(key, db())
     if not ctx:
         raise HTTPException(401, "Invalid API key")
-    return {"role": ctx.role, "project_id": ctx.project_id, "agent_id": ctx.agent_id}
+    return {"role": ctx.role, "project_id": ctx.project_id, "user_id": ctx.user_id}
+
+
+# ── USER MANAGEMENT ──────────────────────────────────────────
+
+@app.post("/api/register")
+def register_user(body: dict):
+    """Register a new user. Returns personal API key.
+
+    Body: {"user_id": "chris", "display_name": "Chris Wang", "email": "..."}
+    """
+    user_id = body.get("user_id", "").strip()
+    if not user_id:
+        raise HTTPException(400, "user_id required")
+    result = auth_module.register_user(
+        user_id, body.get("display_name", ""), body.get("email", ""), db())
+    if result.get("existing"):
+        return {"user_id": user_id, "api_key": result["api_key"],
+                "message": "User already exists. Here is your existing key."}
+    log_event(db(), "user_registered", agent_id=user_id)
+    return {"user_id": user_id, "api_key": result["api_key"],
+            "message": "Registered! Save your API key — it won't be shown again.",
+            "next_step": "Use: aegis init --api-key <key> or login to dashboard"}
+
+
+@app.get("/api/me")
+def get_me(request: Request):
+    """Get current user info + project memberships."""
+    auth = getattr(request.state, "auth", None)
+    if not auth:
+        raise HTTPException(401)
+    user = db().execute("SELECT id,display_name,email,role,created_at FROM users WHERE id=?",
+                       (auth.user_id,)).fetchone()
+    memberships = db().execute(
+        """SELECT pm.project_id, pm.role, p.name as project_name
+           FROM project_members pm JOIN projects p ON p.id=pm.project_id
+           WHERE pm.user_id=?""", (auth.user_id,)).fetchall()
+    return {
+        "user": row_to_dict(user) if user else {"id": auth.user_id, "role": auth.role},
+        "projects": [dict(m) for m in memberships]
+    }
+
+
+@app.post("/api/projects/{pid}/request-join")
+def request_join_project(pid: str, body: dict, request: Request):
+    """Submit a request to join a project. Owner will be notified.
+
+    Body: {"role": "member", "message": "想参与重构工作"}
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth or not auth.user_id:
+        raise HTTPException(401, "Must be logged in")
+
+    proj = db().execute("SELECT id FROM projects WHERE id=?", (pid,)).fetchone()
+    if not proj:
+        raise HTTPException(404, "Project not found")
+
+    result = auth_module.request_join(
+        pid, auth.user_id,
+        role=body.get("role", "member"),
+        message=body.get("message", ""),
+        db_conn=db())
+
+    if result.get("status") == "already_member":
+        return {"message": "你已经是项目成员了", "status": "already_member"}
+    if result.get("status") == "already_pending":
+        return {"message": "你的加入申请正在等待审核", "status": "already_pending"}
+
+    return {"message": "申请已提交，等待项目 Owner 审核",
+            "request_id": result.get("request_id"), "status": "pending"}
+
+
+@app.get("/api/projects/{pid}/join-requests")
+def list_join_requests(pid: str, status: str = "pending", request: Request = None):
+    """List join requests for a project. Only owner/admin can see."""
+    rows = db().execute(
+        """SELECT jr.*, u.display_name, u.email
+           FROM join_requests jr LEFT JOIN users u ON u.id=jr.user_id
+           WHERE jr.project_id=? AND jr.status=?
+           ORDER BY jr.created_at DESC""",
+        (pid, status)).fetchall()
+    return {"requests": [dict(r) for r in rows]}
+
+
+@app.post("/api/join-requests/{req_id}/review")
+def review_join_request(req_id: int, body: dict, request: Request):
+    """Approve or reject a join request.
+
+    Body: {"action": "approved", "note": "欢迎！"}
+    or:   {"action": "rejected", "note": "项目暂不招人"}
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth:
+        raise HTTPException(401)
+
+    action = body.get("action", "")
+    if action not in ("approved", "rejected"):
+        raise HTTPException(400, "action must be 'approved' or 'rejected'")
+
+    result = auth_module.review_join(
+        req_id, auth.user_id or "admin", action,
+        note=body.get("note", ""), db_conn=db())
+
+    if result.get("error") == "not_found":
+        raise HTTPException(404, "Join request not found")
+    if result.get("error") == "already_reviewed":
+        raise HTTPException(400, f"Already reviewed: {result.get('status')}")
+
+    emoji = "✅" if action == "approved" else "❌"
+    log_event(db(), f"join_{action}", result.get("project_id", ""),
+              auth.user_id or "admin", "", result.get("user_id", ""))
+    return {"message": f"{emoji} {'已同意' if action == 'approved' else '已拒绝'}",
+            "status": action}
+
+
+# ── NOTIFICATION CENTER ──────────────────────────────────────
+
+@app.get("/api/notifications")
+def get_notifications(unread_only: bool = False, limit: int = 50, request: Request = None):
+    """Get notifications for the current user."""
+    auth = getattr(request.state, "auth", None)
+    if not auth or not auth.user_id:
+        raise HTTPException(401)
+    notes = auth_module.get_notifications(auth.user_id, unread_only, limit, db())
+    unread_count = db().execute(
+        "SELECT COUNT(*) as c FROM notifications WHERE user_id=? AND is_read=0",
+        (auth.user_id,)).fetchone()["c"]
+    return {"notifications": notes, "unread_count": unread_count}
+
+
+@app.post("/api/notifications/{nid}/read")
+def mark_notification_read(nid: int, request: Request):
+    """Mark a notification as read."""
+    auth = getattr(request.state, "auth", None)
+    if not auth:
+        raise HTTPException(401)
+    auth_module.mark_read(nid, db())
+    return {"ok": True}
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_read(request: Request):
+    """Mark all notifications as read."""
+    auth = getattr(request.state, "auth", None)
+    if not auth or not auth.user_id:
+        raise HTTPException(401)
+    db().execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (auth.user_id,))
+    db().commit()
+    return {"ok": True}
+
+
+@app.get("/api/projects/{pid}/members")
+def list_members(pid: str, request: Request):
+    """List project members."""
+    members = db().execute(
+        """SELECT pm.user_id, pm.role, pm.joined_at, u.display_name, u.email
+           FROM project_members pm LEFT JOIN users u ON u.id=pm.user_id
+           WHERE pm.project_id=?""", (pid,)).fetchall()
+    return {"members": [dict(m) for m in members]}
+
+
 
 
 @app.get("/status")
@@ -339,6 +499,12 @@ def create_project(body: ProjectCreate):
     db().commit()
     # Auto-provision: API keys
     result = provisioner.provision_project(body.id, body.master_id, db())
+    # Auto-add creator as owner
+    if body.master_id:
+        db().execute(
+            "INSERT OR IGNORE INTO project_members (project_id,user_id,role,invited_by,joined_at) VALUES(?,?,?,?,?)",
+            (body.id, body.master_id, "owner", "system", now))
+        db().commit()
     return {"id": body.id, "name": body.name, "master_id": body.master_id,
             "repo_url": body.repo_url,
             "api_keys": result.api_keys,
