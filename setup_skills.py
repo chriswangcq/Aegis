@@ -82,8 +82,9 @@ Aegis governance platform skills. Server: {server_url}
 |-------|---------|-------------|
 | Onboard | `/aegis-onboard` | First-time setup |
 | Coder | `/aegis-coder` | Claim tickets, implement, submit |
-| Reviewer | `/aegis-reviewer` | Cross-provider code review |
+| Reviewer | `/aegis-reviewer` | Code review (anti-self-review) |
 | Master | `/aegis-master` | Create tickets, advance, deploy |
+| Worker | `/aegis-worker` | Combined coder + reviewer (中文) |
 
 CLI: `aegis <command>` (or `python3 {SKILLS_DIR.parent / 'cli' / 'aegis.py'} <command>`)
 """)

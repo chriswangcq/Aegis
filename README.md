@@ -12,8 +12,8 @@ You (Team Lead)
 │                                                │
 │  Users ─── Projects ─── Tickets ─── Agents     │
 │    │          │            │           │        │
-│  Auth    Environments   Lifecycle    Trust      │
-│  Teams   (ci/pre/prod)  (6 phases)  (Certs)    │
+│  Auth    Environments   Lifecycle   Registry   │
+│  Teams   (ci/pre/prod)  (6 phases)  (Status)   │
 │    │          │            │           │        │
 │  Notifs   SSH Runner    CI Gates   Canary      │
 │           Auto-Deploy   Evidence   Rollback    │
@@ -37,7 +37,7 @@ ECS-CI    ECS-Pre    ECS-Prod
 - [Project Setup](#project-setup)
 - [Ticket Lifecycle](#ticket-lifecycle)
 - [CI / CD Pipeline](#ci--cd-pipeline)
-- [Agent & Trust System](#agent--trust-system)
+- [Agent System](#agent-system)
 - [API Reference](#api-reference)
 - [Environment Configuration](#environment-configuration)
 - [Security Model](#security-model)
@@ -269,8 +269,10 @@ aegis init \
 |---------|-------------|---------|
 | `aegis init` | Configure CLI | `aegis init --server http://... --api-key ...` |
 | `aegis status` | Server health | `aegis status` |
+| `aegis register` | Register as agent | `aegis register --id chris --provider gemini` |
 | `aegis whoami` | Current agent info | `aegis whoami` |
 | `aegis roles` | List available roles | `aegis roles` |
+| `aegis project` | Project dashboard | `aegis project` |
 | `aegis tickets` | List available tickets | `aegis tickets` |
 | `aegis claim` | Claim a ticket | `aegis claim PR-42` |
 | `aegis submit` | Submit work | `aegis submit PR-42 --branch feat/pr42` |
@@ -279,6 +281,7 @@ aegis init \
 | `aegis release` | Release a ticket | `aegis release PR-42` |
 | `aegis comment` | Add comment to ticket | `aegis comment PR-42 --type blocker --content "..."` |
 | `aegis deploy` | Deploy to environment | `aegis deploy pre` |
+| `aegis canary` | Report canary metrics | `aegis canary PR-42 --error-rate 0.01 --latency 50` |
 | `aegis logs` | Event history | `aegis logs --ticket PR-42` |
 | `aegis heartbeat` | Keep ticket lock alive | `aegis heartbeat` |
 
@@ -415,7 +418,7 @@ ssh-copy-id deploy@10.0.1.3
 └──────┬───────┘
        ▼
 ┌─────────────┐   Canary=100% → auto-deploy to PROD
-│    done      │   Trust updated, dependent tickets unblocked
+│    done      │   Dependent tickets unblocked, DORA metrics recorded
 └──────────────┘
 ```
 
