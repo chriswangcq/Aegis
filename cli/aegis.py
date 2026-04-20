@@ -5,12 +5,8 @@ Usage:
     # First time: configure project
     aegis init --server http://aegis.internal:9800 --project my-app --api-key aegis_my-app_agent_xxx
 
-    # Register as an agent
+    # Register and start working
     aegis register --id chris-claude --provider gemini --webhook http://localhost:3000/hook
-
-    # Take certification exam
-    aegis exam coder
-    aegis exam reviewer
 
     # Work on tickets
     aegis tickets                      # list available tickets
@@ -25,7 +21,7 @@ Usage:
 
     # Status
     aegis status                       # server health
-    aegis whoami                       # current agent + certifications
+    aegis whoami                       # current agent info
     aegis project                      # project dashboard
 
 Works with:
@@ -146,7 +142,7 @@ def cmd_register(args):
 
 
 def cmd_whoami(args):
-    """Show current agent info + certifications."""
+    """Show current agent info."""
     cfg = _load_config()
     agent_id = cfg.get("agent_id")
     if not agent_id:
@@ -157,40 +153,8 @@ def cmd_whoami(args):
     print(f"   Status: {data.get('status', '?')}")
     if data.get("current_ticket"):
         print(f"   Working on: {data['current_ticket']} as {data.get('current_role', '?')}")
-    certs = data.get("certifications", [])
-    if certs:
-        print(f"   Certifications:")
-        for c in certs:
-            status = c.get("status", "?")
-            icon = "✅" if status == "passed" else "❌"
-            print(f"     {icon} {c.get('role_id', '?')} (score: {c.get('score', '?')})")
-    else:
-        print(f"   No certifications. Run: aegis exam <role>")
+    print(f"   Ready to claim tickets.")
 
-
-def cmd_exam(args):
-    """Take or view a certification exam."""
-    role = args.role
-    data = _api("GET", f"/roles/{role}/exam")
-    print(f"📝 Exam: {role}")
-    questions = data.get("questions", [])
-    for i, q in enumerate(questions):
-        print(f"\n  Q{i+1}: {q}")
-    print(f"\n💡 Answer via: aegis submit-exam {role} --answers 'A1' 'A2' ...")
-    print(f"   Or ask your AI agent to answer these questions.")
-
-
-def cmd_submit_exam(args):
-    """Submit exam answers."""
-    cfg = _load_config()
-    agent_id = cfg.get("agent_id")
-    if not agent_id:
-        print("❌ Run: aegis init --agent-id <id>", file=sys.stderr)
-        sys.exit(1)
-    body = {"agent_id": agent_id, "answers": args.answers}
-    data = _api("POST", f"/roles/{args.role}/exam", body)
-    print(f"📝 Exam submitted for {args.role}")
-    print(f"   Awaiting grading by master")
 
 
 def cmd_tickets(args):
@@ -424,7 +388,6 @@ def main():
 Examples:
   aegis init --server http://aegis:9800 --project my-app --agent-id chris
   aegis register --id chris --provider gemini
-  aegis exam coder
   aegis tickets
   aegis claim PR-42
   aegis submit PR-42 --branch feature/fix
@@ -454,14 +417,7 @@ Examples:
     # whoami
     sub.add_parser("whoami", help="Show current agent info")
 
-    # exam
-    p = sub.add_parser("exam", help="View certification exam")
-    p.add_argument("role", help="Role to examine (coder/reviewer/qa)")
 
-    # submit-exam
-    p = sub.add_parser("submit-exam", help="Submit exam answers")
-    p.add_argument("role", help="Role")
-    p.add_argument("--answers", nargs="+", required=True, help="Answers to exam questions")
 
     # tickets
     p = sub.add_parser("tickets", help="List tickets")
@@ -537,7 +493,7 @@ Examples:
 
     commands = {
         "init": cmd_init, "status": cmd_status, "register": cmd_register,
-        "whoami": cmd_whoami, "exam": cmd_exam, "submit-exam": cmd_submit_exam,
+        "whoami": cmd_whoami,
         "tickets": cmd_tickets, "create": cmd_create_ticket, "claim": cmd_claim,
         "submit": cmd_submit, "advance": cmd_advance, "reject": cmd_reject,
         "deploy": cmd_deploy, "project": cmd_project, "canary": cmd_canary,

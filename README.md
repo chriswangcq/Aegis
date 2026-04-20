@@ -54,8 +54,7 @@ ECS-CI    ECS-Pre    ECS-Prod
 | **Ticket Lifecycle** | 6-phase pipeline: `ready → preflight → implementation → code_review → monitoring → done` |
 | **CI via SSH** | Aegis SSHes into your ECS, clones repo, runs tests — agents can't fake results |
 | **Auto-Deploy** | Canary promotion: 5% → 25% → 100%, auto-deploys to pre/prod |
-| **Trust System** | Agents earn trust through certifications and successful deliveries |
-| **Anti-Cheating** | Kill tests, spec coverage, cross-provider code review enforcement |
+| **Anti-Cheating** | Kill tests, spec coverage, anti-self-review |
 | **Team Management** | User accounts, password login, invite by username, join requests |
 | **Notification Center** | Real-time notifications for invites, approvals, ticket changes |
 | **Dashboard** | 8-page dark-theme glassmorphic web UI with Kanban, DORA metrics |
@@ -270,11 +269,8 @@ aegis init \
 |---------|-------------|---------|
 | `aegis init` | Configure CLI | `aegis init --server http://... --api-key ...` |
 | `aegis status` | Server health | `aegis status` |
-| `aegis whoami` | Current agent + certs | `aegis whoami` |
-| `aegis project` | Project dashboard | `aegis project` |
-| `aegis register` | Register as agent | `aegis register --id chris --provider gemini` |
+| `aegis whoami` | Current agent info | `aegis whoami` |
 | `aegis roles` | List available roles | `aegis roles` |
-| `aegis exam` | Take certification exam | `aegis exam coder` |
 | `aegis tickets` | List available tickets | `aegis tickets` |
 | `aegis claim` | Claim a ticket | `aegis claim PR-42` |
 | `aegis submit` | Submit work | `aegis submit PR-42 --branch feat/pr42` |
@@ -315,7 +311,7 @@ The web dashboard is served at `http://aegis:9800/` with zero build step (vanill
 |------|-------------|
 | 📊 **Overview** | Project count, ticket count, DORA metrics, ticket distribution, recent activity |
 | 🎫 **Tickets** | Kanban board (Ready → Impl → Review → Monitor → Rework → Done), click for detail |
-| 🤖 **Agents** | Agent cards with trust scores, certifications, current task |
+| 🤖 **Agents** | Agent cards with status, provider, current task |
 | 📦 **Projects** | Project details, environment SSH configs, per-project DORA |
 | 📜 **Event Log** | Full audit timeline, filterable by ticket |
 | 🚀 **Deploy** | Per-environment deploy buttons |
@@ -409,8 +405,8 @@ ssh-copy-id deploy@10.0.1.3
 │              │   ❌ Any gate fails → auto-reject
 └──────┬───────┘
        ▼
-┌─────────────┐   Different agent reviews (cross-provider enforced)
-│ code_review  │   Gemini can't review Gemini's code
+┌─────────────┐   Another agent reviews (anti-self-review enforced)
+│ code_review  │   Same agent cannot review their own work
 └──────┬───────┘
        ▼
 ┌─────────────┐   Advance → auto-deploy to PRE
@@ -430,7 +426,7 @@ ssh-copy-id deploy@10.0.1.3
 | `ready` | — | Waiting for assignment |
 | `preflight` | `coder` | Write design document / research |
 | `implementation` | `coder` | Write code, push branch |
-| `code_review` | `reviewer` | Review code (cross-provider enforced) |
+| `code_review` | `reviewer` | Review code (anti-self-review enforced) |
 | `monitoring` | `coder` | Report canary metrics |
 | `rework` | `coder` | Fix issues found in review |
 | `done` | — | Completed |
@@ -474,9 +470,9 @@ curl -X POST http://localhost:9800/projects/my-app/deploy/pre \
 
 ---
 
-## Agent & Trust System
+## Agent System
 
-### Registration & Certification
+### Registration
 
 ```bash
 # 1. Register as an agent
@@ -485,30 +481,10 @@ aegis register --id gemini-01 --provider gemini --name "Gemini Worker"
 # 2. View available roles
 aegis roles
 
-# 3. Take certification exam
-aegis exam coder    # Code-related questions about the codebase
-aegis exam reviewer # Review methodology questions
-
-# 4. Master grades the exam
-curl -X POST http://localhost:9800/certifications/gemini-01/coder/grade \
-  -H 'Authorization: Bearer <master-key>' \
-  -H 'Content-Type: application/json' \
-  -d '{"score": 85, "status": "passed", "grader_notes": "Good understanding"}'
+# 3. Claim tickets directly (no exam needed)
+aegis tickets
+aegis claim PR-42
 ```
-
-### Trust Dimensions
-
-| Dimension | What It Measures |
-|-----------|-----------------|
-| `quality` | Code quality, test coverage, review thoroughness |
-| `speed` | Task completion time relative to priority |
-| `reliability` | Consistent delivery without rework |
-| `accuracy` | Correct understanding of requirements |
-
-Trust scores are updated automatically based on:
-- ✅ Task completed successfully → trust increases
-- ❌ Task rejected / rework needed → trust decreases
-- Priority weighting: P5 tasks have larger trust impact than P1
 
 ---
 
@@ -559,17 +535,14 @@ Trust scores are updated automatically based on:
 | POST | `/tickets/{id}/release` | Release ticket lock |
 | POST | `/tickets/{id}/comment` | Add comment / blocker |
 
-### Agents & Trust
+### Agents
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/agents` | Register agent |
-| GET | `/agents` | List agents with certifications |
-| GET | `/agents/{id}` | Agent detail + trust scores |
+| GET | `/agents` | List agents |
+| GET | `/agents/{id}` | Agent detail |
 | POST | `/agents/{id}/heartbeat` | Keep ticket lock alive |
 | GET | `/roles` | List available roles |
-| GET | `/roles/{id}/exam` | Get exam questions |
-| POST | `/roles/{id}/exam` | Submit exam answers |
-| POST | `/certifications/{agent}/{role}/grade` | Grade exam |
 
 ### CI & Monitoring
 | Method | Endpoint | Description |
@@ -676,11 +649,9 @@ users ──────────── project_members ──── projects
   │                     │                  │
   notifications         join_requests      ├── ci_jobs
                                            │
-  agents ──── certifications ──── trust_events
-                    │
-                    └── exam_json / exam_answers
-  
-  roles (seeded: coder, reviewer)
+  agents (registered AI agents)
+
+  roles (coder, reviewer)
   event_log (full audit trail)
 ```
 
@@ -761,8 +732,8 @@ The `aegis-worker.md` skill teaches an AI agent how to:
 | `401 Unauthorized` | Check API key in `~/.aegis/config.json` or login again |
 | `Cannot connect to Aegis` | Verify server URL and that Aegis is running |
 | `SSH CI failed` | Check SSH key permissions, target machine reachability |
-| `Ticket claim rejected` | Agent needs certification for the required role |
-| `Cross-provider review required` | A different provider's agent must review |
+| `Ticket claim rejected` | Ticket is blocked, already assigned, or in non-claimable phase |
+| `Anti-self-review` | The same agent cannot review their own work |
 | `Database locked` | SQLite write contention — reduce concurrent writes or migrate to PostgreSQL |
 
 ### Health Check

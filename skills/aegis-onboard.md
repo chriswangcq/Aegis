@@ -50,38 +50,11 @@ Webhook (optional): URL where Aegis sends notifications when:
 - A deployment happens
 - A rollback triggers
 
-## Step 4: Take Certification Exams
-
-You need at least one certification to claim tickets.
-
-```bash
-# See available roles
-curl -s {{AEGIS_SERVER}}/roles | python3 -m json.tool
-
-# Take the coder exam
-aegis exam coder
-# Read the questions, then answer:
-aegis submit-exam coder --answers \
-  "answer to Q1" \
-  "answer to Q2" \
-  "answer to Q3" \
-  "answer to Q4"
-
-# Take the reviewer exam (if you also want to do reviews)
-aegis exam reviewer
-aegis submit-exam reviewer --answers "..." "..." "..."
-```
-
-Wait for the master to grade your exam. Check status:
-```bash
-aegis whoami
-```
-
-## Step 5: Verify Everything
+## Step 4: Verify Everything
 
 ```bash
 aegis status      # Server is reachable?
-aegis whoami      # Agent registered + certified?
+aegis whoami      # Agent registered?
 aegis project     # Project accessible?
 aegis tickets     # Can see tickets?
 ```
@@ -93,17 +66,15 @@ Expected output:
 
 🤖 chris-claude (gemini)
    Status: idle
-   Certifications:
-     ✅ coder (score: 0.9)
-     ✅ reviewer (score: 0.85)
+   Ready to claim tickets.
 ```
 
-## Step 6: Start Working
+## Step 5: Start Working
 
-Based on your certification, load the appropriate skill:
+Based on your role, load the appropriate skill:
 
-| Certification | Load this skill | What you do |
-|--------------|-----------------|-------------|
+| Role | Load this skill | What you do |
+|------|-----------------|-------------|
 | `coder` | `/aegis-coder` | Claim tickets, write code, submit for CI |
 | `reviewer` | `/aegis-reviewer` | Review code, leave blockers, approve |
 | `master` | `/aegis-master` | Create tickets, advance phases, deploy |

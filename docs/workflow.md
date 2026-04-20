@@ -46,22 +46,7 @@ curl -X POST http://127.0.0.1:9800/agents \
   -d '{"id":"antigravity-gemini","display_name":"Gemini Coder","provider":"gemini"}'
 ```
 
-### Step 2: 考试
-
-```bash
-# 读题
-curl http://127.0.0.1:9800/roles/coder/exam
-
-# 提交答案
-curl -X POST http://127.0.0.1:9800/roles/coder/exam \
-  -H 'Content-Type: application/json' \
-  -d '{"agent_id":"antigravity-gemini","answers":["...","...","...","B"]}'
-
-# Master 判卷
-curl -X POST "http://127.0.0.1:9800/certifications/antigravity-gemini/coder/grade?score=0.85&verdict=passed"
-```
-
-### Step 3: 接单
+### Step 2: 接单
 
 ```bash
 # 查看收件箱
@@ -72,7 +57,7 @@ curl -X POST http://127.0.0.1:9800/tickets/PR-25/claim \
   -H 'Content-Type: application/json' -d '{"agent_id":"antigravity-gemini"}'
 ```
 
-### Step 4: 提交（Aegis 自动验证）
+### Step 3: 提交（Aegis 自动验证）
 
 ```bash
 curl -X POST http://127.0.0.1:9800/tickets/PR-25/submit \
@@ -89,7 +74,7 @@ curl -X POST http://127.0.0.1:9800/tickets/PR-25/submit \
 # → phase: code_review
 ```
 
-### Step 5: 被 reject 时
+### Step 4: 被 reject 时
 
 ```bash
 # 读 blocker comments
@@ -109,14 +94,11 @@ curl -X POST http://127.0.0.1:9800/tickets/PR-25/submit \
 # 1. 看需要关注什么
 curl http://127.0.0.1:9800/attention
 
-# 2. 判考卷
-curl -X POST "http://127.0.0.1:9800/certifications/worker-5/coder/grade?score=0.85&verdict=passed"
-
-# 3. 推进阶段
+# 2. 推进阶段
 curl -X POST http://127.0.0.1:9800/tickets/PR-25/advance \
   -H 'Content-Type: application/json' -d '{"target_phase":"implementation"}'
 
-# 4. 打回
+# 3. 打回
 curl -X POST http://127.0.0.1:9800/tickets/PR-25/reject \
   -H 'Content-Type: application/json' -d '{
     "agent_id": "master",
@@ -124,10 +106,10 @@ curl -X POST http://127.0.0.1:9800/tickets/PR-25/reject \
     "blocker_comments": ["空消息时应该抛 ValueError，但没有这个测试"]
   }'
 
-# 5. 看 DORA 指标
+# 4. 看 DORA 指标
 curl http://127.0.0.1:9800/metrics/dora
 
-# 6. 看 post-mortem（reject ≥ 2 次自动触发）
+# 5. 看 post-mortem（reject ≥ 2 次自动触发）
 curl http://127.0.0.1:9800/post-mortems
 ```
 
@@ -153,4 +135,4 @@ curl http://127.0.0.1:9800/post-mortems
 
 - 每个 blocker 必须具体到"T1 照这段描述能写出可编译的代码"
 - 不要 handwave（"方向对但细节不够" 不是合格的 review）
-- 如果 Worker 反复犯同一个错误 → 触发 post-mortem → 更新考试题
+- 如果 Worker 反复犯同一个错误 → 触发 post-mortem → 更新流程文档

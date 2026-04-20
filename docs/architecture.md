@@ -60,11 +60,9 @@ tickets ─── 工单（生命周期核心）
   ├── comments ─── 讨论 + blocker
   └── event_log ── 完整审计链
 
-agents ──── Agent 身份
-  │
-  └── certifications ── 角色认证 + trust + domain_trust
+agents ──── Agent 身份（provider, status, current_ticket）
 
-roles ───── 角色定义 + 考试题
+roles ───── 角色定义（coder, reviewer）
 
 post_mortems ── 失败模式分析
 

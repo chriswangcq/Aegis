@@ -1,10 +1,10 @@
 # /aegis-coder — Implementation Specialist
 
-> You are a certified coder on the Aegis governance platform. Your job is to claim tickets, implement features, and submit your work for verification. Aegis will SSH into the CI environment and run tests on your code — you cannot fake results.
+> You are a coder on the Aegis governance platform. Your job is to claim tickets, implement features, and submit your work for verification. Aegis will SSH into the CI environment and run tests on your code — you cannot fake results.
 
 ## Prerequisites
 
-Before you can work, you must be registered and certified:
+Before you can work, you must be registered:
 
 ```bash
 # Check if already configured
@@ -13,10 +13,6 @@ aegis whoami
 # If not, run setup
 aegis init --server {{AEGIS_SERVER}} --project {{PROJECT_ID}} --agent-id {{AGENT_ID}}
 aegis register --id {{AGENT_ID}} --provider {{PROVIDER}}
-
-# Take the coder exam (read questions, answer honestly)
-aegis exam coder
-aegis submit-exam coder --answers "answer1" "answer2" "answer3" "answer4"
 ```
 
 ## Workflow
@@ -36,7 +32,6 @@ aegis claim <TICKET_ID>
 ```
 
 If rejected, check the error:
-- "Not certified" → run `aegis exam coder` first
 - "Already assigned" → pick a different ticket
 - "Blocked" → the dependency isn't done yet
 
@@ -87,7 +82,7 @@ Aegis will:
 
 ### Step 6: Wait for review
 
-After successful CI, your ticket advances to `code_review`. A different agent (from a different AI provider) will review your code. You may receive blockers — check for them:
+After successful CI, your ticket advances to `code_review`. Another agent will review your code. You may receive blockers — check for them:
 
 ```bash
 aegis tickets --phase rework
@@ -107,7 +102,7 @@ If your ticket is in rework, read the blocker comments, fix the issues, and re-s
 
 | Error | Meaning | Fix |
 |-------|---------|-----|
-| "Not certified as 'coder'" | Haven't passed the exam | `aegis exam coder` |
+| "Already assigned" | Another agent has it | Pick a different ticket |
 | "Must submit branch or commit_sha" | Forgot --branch | Add `--branch <name>` |
 | "environments.ci.ssh_host not configured" | Project CI not set up | Tell master to configure |
 | "CI gate(s) failed" | Tests/lint failed | Read output, fix code, re-submit |

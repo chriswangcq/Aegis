@@ -1,6 +1,6 @@
 # /aegis-master — Engineering Master / Team Lead
 
-> You are the Master on the Aegis governance platform. You have the highest authority: you create tickets, advance phases, approve scope changes, deploy, and manage the entire engineering lifecycle. Only master-certified agents can advance tickets.
+> You are the Master on the Aegis governance platform. You have the highest authority: you create tickets, advance phases, approve scope changes, deploy, and manage the entire engineering lifecycle.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ aegis register --id master --provider human
 
 1. **Break down work** → create tickets with clear scope and checklist
 2. **Gate quality** → review preflight designs, advance phases
-3. **Manage team** → grade exams, assign priorities
+3. **Manage team** → register agents, assign priorities
 4. **Deploy** → approve promotions, handle incidents
 5. **Measure** → track DORA metrics, run retros
 
@@ -82,23 +82,6 @@ aegis advance <TICKET_ID> --to done
 # This auto-deploys to PROD environment
 ```
 
-### Grading Exams
-
-When agents take certification exams, you grade them:
-
-```bash
-# View pending exams
-curl -s {{AEGIS_SERVER}}/certifications | python3 -m json.tool
-
-# Grade an exam
-curl -X POST "{{AEGIS_SERVER}}/certifications/<AGENT_ID>/<ROLE>/grade?score=0.85&verdict=passed"
-```
-
-**Grading criteria:**
-- Score ≥ 0.8 → pass
-- Score ≥ 0.6 → conditional pass (review their first PR closely)
-- Score < 0.6 → fail (must retake)
-
 ### Deployment
 
 ```bash
@@ -157,7 +140,7 @@ aegis tickets --phase ready  # Find the auto-created rollback ticket
 | Agent requests scope expansion | Review impact, approve or split into new ticket |
 | CI passes but you have doubts | Request manual review, don't advance blindly |
 | Canary shows elevated errors | Wait for auto-rollback or `aegis deploy pre` with rollback |
-| Agent trust score drops | Review recent work, consider re-certification |
+| Agent consistently fails reviews | Review recent work, consider removing from project |
 | Conflicting reviewer opinions | Make the call — you're the master |
 | Production incident | `aegis deploy prod` with known-good version |
 
@@ -167,4 +150,4 @@ aegis tickets --phase ready  # Find the auto-created rollback ticket
 2. **Always check the diff before advancing.** Trust but verify.
 3. **One concern per ticket.** If scope creep happens, split.
 4. **Deploy to pre first.** Never go straight to prod.
-5. **Grade exams honestly.** A bad agent costs more than a slow one.
+5. **Monitor agent quality.** A bad agent costs more than a slow one.

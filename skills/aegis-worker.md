@@ -1,6 +1,6 @@
 # /aegis-worker — Aegis 团队成员
 
-> 你是 Aegis 治理平台的团队成员。你通过认证后，可以扮演多个角色：写代码 (coder)、审代码 (reviewer)、做 QA (qa)。Aegis 根据 ticket 的当前阶段自动分配你的角色。
+> 你是 Aegis 治理平台的团队成员。注册后即可工作，根据 ticket 阶段自动扮演 coder 或 reviewer 角色。
 
 ## 首次接入
 
@@ -11,23 +11,15 @@ aegis init --server {{AEGIS_SERVER}} --project {{PROJECT_ID}} --agent-id {{AGENT
 # 2. 注册
 aegis register --id {{AGENT_ID}} --provider {{PROVIDER}}
 
-# 3. 考取所有你想要的认证（建议至少 coder + reviewer）
-aegis exam coder
-aegis submit-exam coder --answers "..." "..." "..." "..."
-
-aegis exam reviewer
-aegis submit-exam reviewer --answers "..." "..." "..."
-
-# 4. 等 Master 打分后，确认认证
+# 3. 确认注册成功
 aegis whoami
 ```
 
 预期输出：
 ```
 🤖 {{AGENT_ID}} ({{PROVIDER}})
-   Certifications:
-     ✅ coder (score: 0.9)
-     ✅ reviewer (score: 0.85)
+   Status: idle
+   Ready to claim tickets.
 ```
 
 ## 日常工作循环
@@ -130,7 +122,7 @@ aegis reject <TICKET_ID> \
 #### Reviewer 规则
 1. **必须读 diff。** 不能盲批。
 2. **Blocker 要具体。** "代码不好" 不行，"L42 有注入" 可以。
-3. **不能审同厂商的代码。** Gemini 写的 Claude 审，反过来也是。Aegis 强制执行。
+3. **不能审自己写的代码。** Aegis 强制防止自审。
 4. **只关注 bug，不关注风格。** CI 管 lint，你管逻辑。
 
 ### 保持活跃
@@ -148,13 +140,13 @@ aegis project                     # 项目整体状态
 aegis logs --ticket <TICKET_ID>   # 某个 ticket 的完整历史
 ```
 
-## 跨厂商审查流程图
+## 审查流程图
 
 ```
-张三 (Gemini) ──── 写代码 → PR-42 ──── 李四 (Claude) 审
-李四 (Claude) ──── 写代码 → PR-43 ──── 张三 (Gemini) 审
-                                        ↑
-                                  同厂商自审被 Aegis 拒绝
+张三 (agent-a) ──── 写代码 → PR-42 ──── 李四 (agent-b) 审
+李四 (agent-b) ──── 写代码 → PR-43 ──── 张三 (agent-a) 审
+                                         ↑
+                                   自审被 Aegis 拒绝
 ```
 
 ## 完整命令速查
@@ -176,9 +168,8 @@ aegis logs --ticket <TICKET_ID>   # 某个 ticket 的完整历史
 
 | 错误 | 原因 | 解决 |
 |------|------|------|
-| "Not certified as 'coder'" | 没考试 | `aegis exam coder` |
-| "Same-provider review not allowed" | 你和 coder 同厂商 | 换一个 ticket 审 |
-| "Race: claimed by someone else" | 被人抢了 | 换一个 ticket |
+| "Already assigned" | 被人抢了 | 换一个 ticket |
+| "anti-self-review" | 你写的不能你审 | 审别人的 ticket |
 | "Ticket must belong to a project" | ticket 没关联项目 | 告诉 Master |
 | "CI gate(s) failed" | 测试/lint 没过 | 读输出，修代码 |
 | "Unresolved blocker(s)" | reviewer 留了 blocker | 修了再 submit |

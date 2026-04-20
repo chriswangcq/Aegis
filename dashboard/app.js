@@ -306,13 +306,6 @@ async function loadAgents() {
   document.getElementById('agent-grid').innerHTML = agents.map(a => {
     const prov = a.provider || 'unknown';
     const initials = (a.display_name || a.id || '?').substring(0,2).toUpperCase();
-    const certs = (a.certifications||[]).map(c =>
-      `<span class="cert-badge ${c.status||'pending'}">${c.role_id} ${c.score?('('+c.score+')'):''}</span>`).join('');
-    const trust = a.certifications?.length ? a.certifications.reduce((sum,c) => {
-      const t = c.trust_json || {}; const vals = Object.values(t);
-      return sum + (vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0.5);
-    }, 0) / a.certifications.length : 0.5;
-    const trustPct = Math.round(trust * 100);
 
     return `<div class="agent-card">
       <div class="agent-header">
@@ -321,10 +314,6 @@ async function loadAgents() {
         <span class="agent-status-badge ${a.status||'idle'}">${a.status||'idle'}</span>
       </div>
       ${a.current_ticket?`<div style="font-size:12px;color:var(--accent-amber);margin-bottom:8px">Working on: ${a.current_ticket} (${a.current_role||''})</div>`:''}
-      <div style="font-size:12px;color:var(--text-muted)">Tasks: ${a.certifications?.reduce((s,c)=>s+(c.tasks_completed||0),0)||0} completed · ${a.certifications?.reduce((s,c)=>s+(c.tasks_failed||0),0)||0} failed</div>
-      <div class="cert-list">${certs||'<span style="font-size:12px;color:var(--text-muted)">No certifications</span>'}</div>
-      <div class="trust-bar"><div class="trust-label"><span>Trust Score</span><span>${trustPct}%</span></div>
-        <div class="trust-track"><div class="trust-fill" style="width:${trustPct}%"></div></div></div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:8px">Last active: ${fmtTime(a.last_active_at)}</div>
     </div>`;
   }).join('');

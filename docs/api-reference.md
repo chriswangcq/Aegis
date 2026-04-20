@@ -15,7 +15,7 @@
 - [通知中心](#通知中心)
 - [项目管理](#项目管理)
 - [工单管理](#工单管理)
-- [Agent 与信任](#agent-与信任)
+- [Agent](#agent)
 - [CI 与部署](#ci-与部署)
 - [监控与指标](#监控与指标)
 
@@ -439,9 +439,9 @@ Agent 认领工单。
 ```
 
 **Rules:**
-- Agent 必须有对应角色的认证
 - Agent 不能同时认领多个工单（configurable）
 - 工单依赖必须已完成
+- 不能自审（同一 agent 不能 review 自己的代码）
 
 ---
 
@@ -500,7 +500,7 @@ Agent 认领工单。
 
 ---
 
-## Agent 与信任
+## Agent
 
 ### POST /agents
 
@@ -531,8 +531,7 @@ Agent 认领工单。
     {
       "id": "coder",
       "display_name": "Coder",
-      "description": "写代码、写测试、调试",
-      "exam_count": 3
+      "description": "写代码、写测试、调试"
     },
     {
       "id": "reviewer",
@@ -543,28 +542,6 @@ Agent 认领工单。
 }
 ```
 
----
-
-### GET /roles/{id}/exam
-
-获取角色认证考试题目。
-
-### POST /roles/{id}/exam
-
-提交考试答案。
-
-### POST /certifications/{agent}/{role}/grade
-
-Master 评分认证。
-
-**Request:**
-```json
-{
-  "score": 85,
-  "status": "passed",
-  "grader_notes": "Good understanding of the codebase"
-}
-```
 
 ---
 
