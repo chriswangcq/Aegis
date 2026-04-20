@@ -11,6 +11,7 @@ Project keys format: aegis_{project}_{role}_{random}
 import secrets
 import time
 import json
+import hashlib
 from dataclasses import dataclass
 
 
@@ -141,25 +142,102 @@ def create_project_keys(project_id: str, master_agent_id: str = "",
     return keys
 
 
+def _hash_password(password: str) -> str:
+    """Hash password with salt using SHA-256."""
+    salt = secrets.token_hex(16)
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"{salt}:{h}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Verify password against stored hash."""
+    if not stored or ':' not in stored:
+        return False
+    salt, h = stored.split(':', 1)
+    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest() == h
+
+
 def register_user(user_id: str, display_name: str, email: str,
-                  db_conn=None) -> dict:
-    """Register a new user and return their API key."""
+                  password: str = "", db_conn=None) -> dict:
+    """Register a new user. Returns API key."""
     now = int(time.time() * 1000)
     api_key = generate_user_key()
+    pw_hash = _hash_password(password) if password else ""
 
     if db_conn:
-        # Check if user exists
         existing = db_conn.execute("SELECT api_key FROM users WHERE id=?", (user_id,)).fetchone()
         if existing:
             return {"user_id": user_id, "api_key": existing["api_key"], "existing": True}
 
         db_conn.execute(
-            "INSERT INTO users (id,display_name,email,api_key,role,created_at) VALUES(?,?,?,?,?,?)",
-            (user_id, display_name or user_id, email, api_key, "member", now)
-        )
+            "INSERT INTO users (id,display_name,email,password_hash,api_key,role,created_at) VALUES(?,?,?,?,?,?,?)",
+            (user_id, display_name or user_id, email, pw_hash, api_key, "member", now))
         db_conn.commit()
 
     return {"user_id": user_id, "api_key": api_key, "existing": False}
+
+
+def login_with_password(user_id: str, password: str, db_conn=None) -> dict | None:
+    """Login with username + password. Returns API key on success."""
+    if not db_conn:
+        return None
+    user = db_conn.execute(
+        "SELECT id, display_name, password_hash, api_key, role FROM users WHERE id=?",
+        (user_id,)).fetchone()
+    if not user:
+        return None
+    if not user["password_hash"]:
+        return None  # user has no password set (API key only)
+    if not _verify_password(password, user["password_hash"]):
+        return None
+    # Update last login
+    db_conn.execute("UPDATE users SET last_login_at=? WHERE id=?",
+                   (int(time.time() * 1000), user_id))
+    db_conn.commit()
+    return {"user_id": user["id"], "display_name": user["display_name"],
+            "api_key": user["api_key"], "role": user["role"]}
+
+
+def invite_user_to_project(project_id: str, target_user_id: str,
+                           role: str, inviter_id: str,
+                           db_conn=None) -> dict:
+    """Owner directly adds a user to a project by username."""
+    if not db_conn:
+        return {"error": "no db"}
+    now = int(time.time() * 1000)
+
+    # Check target user exists
+    user = db_conn.execute("SELECT id, display_name FROM users WHERE id=?",
+                          (target_user_id,)).fetchone()
+    if not user:
+        return {"error": "user_not_found"}
+
+    # Check already member
+    existing = db_conn.execute(
+        "SELECT 1 FROM project_members WHERE project_id=? AND user_id=?",
+        (project_id, target_user_id)).fetchone()
+    if existing:
+        return {"error": "already_member"}
+
+    # Add directly
+    db_conn.execute(
+        "INSERT INTO project_members (project_id,user_id,role,invited_by,joined_at) VALUES(?,?,?,?,?)",
+        (project_id, target_user_id, role, inviter_id, now))
+
+    # Get project name for notification
+    proj = db_conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+    proj_name = proj["name"] if proj else project_id
+
+    inviter = db_conn.execute("SELECT display_name FROM users WHERE id=?", (inviter_id,)).fetchone()
+    inviter_name = inviter["display_name"] if inviter else inviter_id
+
+    _create_notification(db_conn, target_user_id, "project_invited",
+        f"📬 你被邀请加入了 {proj_name}",
+        f"{inviter_name} 邀请你以 {role} 身份加入项目 {project_id}",
+        "project", project_id)
+
+    db_conn.commit()
+    return {"status": "added", "user_id": target_user_id, "project_id": project_id}
 
 
 def request_join(project_id: str, user_id: str, role: str = "member",

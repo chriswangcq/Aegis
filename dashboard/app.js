@@ -31,34 +31,69 @@ function showLogin(msg) {
           <h1 style="font-size:24px;font-weight:700;margin-bottom:4px">Aegis</h1>
           <p style="font-size:13px;color:var(--text-muted);margin-bottom:24px">Engineering Governance Platform</p>
           <div id="login-error" style="color:var(--accent-rose);font-size:13px;margin-bottom:12px;display:none"></div>
-          <input id="login-key" type="password" placeholder="API Key" 
-            style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:12px;outline:none"
-            onkeydown="if(event.key==='Enter')doLogin()">
-          <button onclick="doLogin()" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px">Sign In</button>
-          <p style="font-size:11px;color:var(--text-muted);margin-top:16px">Use your project API key or admin key</p>
+          <div id="login-form">
+            <input id="login-user" type="text" placeholder="用户名" autocomplete="username"
+              style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:8px;outline:none">
+            <input id="login-pass" type="password" placeholder="密码" autocomplete="current-password"
+              style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:8px;outline:none"
+              onkeydown="if(event.key==='Enter')doLogin()">
+            <div id="register-fields" style="display:none">
+              <input id="reg-name" type="text" placeholder="显示名称（选填）"
+                style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:8px;outline:none">
+              <input id="reg-email" type="email" placeholder="邮箱（选填）"
+                style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:8px;outline:none">
+            </div>
+            <button id="login-btn" onclick="doLogin()" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px">登 录</button>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:12px;cursor:pointer" onclick="toggleRegister()">
+              <span id="toggle-text">没有账号？点击注册</span>
+            </p>
+          </div>
         </div>
       </div>`;
     document.body.appendChild(login);
   }
   login.style.display = 'block';
   if (msg) { const e = document.getElementById('login-error'); e.textContent = msg; e.style.display = 'block'; }
-  document.getElementById('login-key').focus();
+  document.getElementById('login-user').focus();
+}
+
+let _isRegister = false;
+function toggleRegister() {
+  _isRegister = !_isRegister;
+  document.getElementById('register-fields').style.display = _isRegister ? 'block' : 'none';
+  document.getElementById('login-btn').textContent = _isRegister ? '注 册' : '登 录';
+  document.getElementById('toggle-text').textContent = _isRegister ? '已有账号？返回登录' : '没有账号？点击注册';
+  document.getElementById('login-error').style.display = 'none';
 }
 
 async function doLogin() {
-  const key = document.getElementById('login-key').value.trim();
-  if (!key) return;
+  const userId = document.getElementById('login-user').value.trim();
+  const password = document.getElementById('login-pass').value;
+  if (!userId || !password) { document.getElementById('login-error').textContent='请输入用户名和密码'; document.getElementById('login-error').style.display='block'; return; }
+
+  const errEl = document.getElementById('login-error');
   try {
-    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key: key})});
-    if (!r.ok) { const d = await r.json(); document.getElementById('login-error').textContent = d.detail||'Invalid key'; document.getElementById('login-error').style.display='block'; return; }
+    if (_isRegister) {
+      const r = await fetch('/api/register', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({user_id: userId, password, display_name: document.getElementById('reg-name').value, email: document.getElementById('reg-email').value})});
+      const d = await r.json();
+      if (!r.ok) { errEl.textContent = d.detail||'注册失败'; errEl.style.display='block'; return; }
+      toast('注册成功！正在登录...', 'success');
+      _isRegister = false;
+    }
+    // Login
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_id: userId, password})});
     const data = await r.json();
-    _apiKey = key;
-    localStorage.setItem('aegis_api_key', key);
+    if (!r.ok) { errEl.textContent = data.detail||'登录失败'; errEl.style.display='block'; return; }
+    _apiKey = data.api_key;
+    localStorage.setItem('aegis_api_key', data.api_key);
+    localStorage.setItem('aegis_user', JSON.stringify({id: data.user_id, name: data.display_name||data.user_id, role: data.role}));
     document.getElementById('login-screen').style.display = 'none';
     document.querySelector('.app').style.display = 'flex';
-    toast(`Logged in as ${data.role} (${data.project_id})`, 'success');
+    toast(`欢迎, ${data.display_name||data.user_id}`, 'success');
     loadOverview();
-  } catch(e) { document.getElementById('login-error').textContent = 'Connection failed'; document.getElementById('login-error').style.display='block'; }
+  } catch(e) { errEl.textContent = '连接失败'; errEl.style.display='block'; }
 }
 
 function toast(msg, type='info') {

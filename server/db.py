@@ -269,6 +269,7 @@ def init_schema(conn: sqlite3.Connection):
         id             TEXT PRIMARY KEY,
         display_name   TEXT DEFAULT '',
         email          TEXT DEFAULT '',
+        password_hash  TEXT DEFAULT '',
         api_key        TEXT UNIQUE NOT NULL,
         role           TEXT DEFAULT 'member',
         created_at     INTEGER,

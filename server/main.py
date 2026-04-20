@@ -135,15 +135,30 @@ def root_redirect():
 
 @app.post("/api/login")
 def login(body: dict):
-    """Validate API key and return auth context. Used by dashboard."""
+    """Login via username+password or API key.
+
+    Body: {"user_id": "chris", "password": "xxx"}
+    or:   {"api_key": "aegis_u_xxx"}
+    """
+    # Method 1: username + password
+    user_id = body.get("user_id", "")
+    password = body.get("password", "")
+    if user_id and password:
+        result = auth_module.login_with_password(user_id, password, db())
+        if not result:
+            raise HTTPException(401, "用户名或密码错误")
+        return {"role": result["role"], "project_id": "*", "user_id": result["user_id"],
+                "display_name": result["display_name"], "api_key": result["api_key"]}
+
+    # Method 2: API key
     key = body.get("api_key", "")
     if not key:
-        raise HTTPException(401, "API key required")
+        raise HTTPException(401, "请提供用户名+密码或 API Key")
     if ADMIN_KEY and key == ADMIN_KEY:
         return {"role": "admin", "project_id": "*", "user_id": "admin"}
     ctx = auth_module.validate_api_key(key, db())
     if not ctx:
-        raise HTTPException(401, "Invalid API key")
+        raise HTTPException(401, "无效的 API Key")
     return {"role": ctx.role, "project_id": ctx.project_id, "user_id": ctx.user_id}
 
 
@@ -151,22 +166,28 @@ def login(body: dict):
 
 @app.post("/api/register")
 def register_user(body: dict):
-    """Register a new user. Returns personal API key.
+    """Register a new user with username + password.
 
-    Body: {"user_id": "chris", "display_name": "Chris Wang", "email": "..."}
+    Body: {"user_id": "chris", "password": "xxx", "display_name": "Chris Wang", "email": "..."}
     """
     user_id = body.get("user_id", "").strip()
+    password = body.get("password", "").strip()
     if not user_id:
         raise HTTPException(400, "user_id required")
+    if not password:
+        raise HTTPException(400, "password required")
+    if len(password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+
     result = auth_module.register_user(
-        user_id, body.get("display_name", ""), body.get("email", ""), db())
+        user_id, body.get("display_name", ""), body.get("email", ""),
+        password=password, db_conn=db())
     if result.get("existing"):
-        return {"user_id": user_id, "api_key": result["api_key"],
-                "message": "User already exists. Here is your existing key."}
+        raise HTTPException(409, "用户名已存在")
     log_event(db(), "user_registered", agent_id=user_id)
     return {"user_id": user_id, "api_key": result["api_key"],
-            "message": "Registered! Save your API key — it won't be shown again.",
-            "next_step": "Use: aegis init --api-key <key> or login to dashboard"}
+            "message": "注册成功！API Key 用于 CLI，Dashboard 用账号密码登录。"}
+
 
 
 @app.get("/api/me")
@@ -304,6 +325,34 @@ def list_members(pid: str, request: Request):
            WHERE pm.project_id=?""", (pid,)).fetchall()
     return {"members": [dict(m) for m in members]}
 
+
+@app.post("/api/projects/{pid}/invite")
+def invite_to_project(pid: str, body: dict, request: Request):
+    """Owner invites a user by username.
+
+    Body: {"user_id": "zhangsan", "role": "member"}
+    """
+    auth = getattr(request.state, "auth", None)
+    if not auth:
+        raise HTTPException(401)
+
+    target = body.get("user_id", "").strip()
+    if not target:
+        raise HTTPException(400, "user_id required")
+    role = body.get("role", "member")
+    if role not in ("member", "viewer"):
+        raise HTTPException(400, "role must be 'member' or 'viewer'")
+
+    result = auth_module.invite_user_to_project(
+        pid, target, role, auth.user_id or "admin", db_conn=db())
+
+    if result.get("error") == "user_not_found":
+        raise HTTPException(404, f"用户 '{target}' 不存在")
+    if result.get("error") == "already_member":
+        raise HTTPException(400, f"用户 '{target}' 已经是项目成员")
+
+    log_event(db(), "member_invited", pid, auth.user_id or "admin", "", target)
+    return {"message": f"已邀请 {target} 加入 {pid}", "status": "added"}
 
 
 
