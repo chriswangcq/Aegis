@@ -17,7 +17,7 @@ import shutil
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).parent / "skills"
-SKILL_FILES = ["aegis-onboard.md", "aegis-coder.md", "aegis-reviewer.md", "aegis-master.md"]
+SKILL_FILES = ["aegis-onboard.md", "aegis-worker.md", "aegis-coder.md", "aegis-reviewer.md", "aegis-master.md"]
 
 # Where each AI agent host looks for skills
 HOSTS = {
