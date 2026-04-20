@@ -41,6 +41,14 @@
         <div class="nav-item" data-section="deploy">
           <span class="icon">🚀</span><span>Deploy</span>
         </div>
+        <div style="margin:12px 0;border-top:1px solid var(--border)"></div>
+        <div class="nav-item" data-section="team">
+          <span class="icon">👥</span><span>Team</span>
+        </div>
+        <div class="nav-item" data-section="notifications">
+          <span class="icon">🔔</span><span>Notifications</span>
+          <span class="nav-badge" id="nav-notif-count" style="display:none">0</span>
+        </div>
       </nav>
       <div class="sidebar-footer">
         <div class="server-status">
@@ -144,6 +152,33 @@
         </div>
         <div class="page-content">
           <div id="deploy-content"></div>
+        </div>
+      </div>
+
+      <!-- ── Team ──────────────────────────────────────── -->
+      <div class="section" id="section-team">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Team</div>
+            <div class="page-subtitle">项目成员管理</div>
+          </div>
+        </div>
+        <div class="page-content" id="team-content"></div>
+      </div>
+
+      <!-- ── Notifications ─────────────────────────────── -->
+      <div class="section" id="section-notifications">
+        <div class="page-header">
+          <div>
+            <div class="page-title">Notifications</div>
+            <div class="page-subtitle">消息中心</div>
+          </div>
+          <div class="header-actions">
+            <button class="btn" onclick="markAllRead()">✓ 全部已读</button>
+          </div>
+        </div>
+        <div class="page-content">
+          <div class="timeline" id="notif-list"></div>
         </div>
       </div>
     </main>

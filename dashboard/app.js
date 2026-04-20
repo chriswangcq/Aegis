@@ -129,7 +129,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
     const sec = item.dataset.section;
     document.getElementById('section-' + sec).classList.add('active');
     const loaders = {overview:loadOverview, tickets:loadTickets, agents:loadAgents,
-      projects:loadProjects, events:loadEvents, deploy:loadDeploy};
+      projects:loadProjects, events:loadEvents, deploy:loadDeploy,
+      team:loadTeam, notifications:loadNotifications};
     if (loaders[sec]) loaders[sec]();
   });
 });
@@ -456,20 +457,145 @@ async function deployTo(pid, env) {
   else toast(d.detail||'Deploy failed', 'error');
 }
 
+// ── Team ──
+async function loadTeam() {
+  const projects = await api('/projects');
+  const plist = projects?.projects || [];
+  if (!plist.length) { document.getElementById('team-content').innerHTML =
+    '<div class="empty-state"><div class="icon">👥</div><p>No projects</p></div>'; return; }
+
+  let html = '';
+  for (const p of plist) {
+    const [membersData, requestsData] = await Promise.all([
+      api(`/api/projects/${p.id}/members`),
+      api(`/api/projects/${p.id}/join-requests?status=pending`)
+    ]);
+    const members = membersData?.members || [];
+    const requests = requestsData?.requests || [];
+
+    html += `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:24px;margin-bottom:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h3 style="font-size:18px;font-weight:700">${p.name||p.id}</h3>
+        <button class="btn btn-primary" onclick="showInviteModal('${p.id}')">+ 邀请成员</button>
+      </div>
+      <div style="display:grid;gap:8px;margin-bottom:16px">
+        ${members.map(m => `<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg-glass);border-radius:var(--radius-sm)">
+          <div style="width:32px;height:32px;border-radius:50%;background:${m.role==='owner'?'var(--gradient-blue)':'var(--gradient-emerald)'};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:white">${(m.display_name||m.user_id||'?').substring(0,1).toUpperCase()}</div>
+          <div style="flex:1"><div style="font-size:14px;font-weight:500">${m.display_name||m.user_id}</div>
+            <div style="font-size:11px;color:var(--text-muted)">${m.email||''}</div></div>
+          <span class="phase-badge ${m.role==='owner'?'done':'ready'}">${m.role}</span>
+        </div>`).join('')}
+      </div>
+      ${requests.length ? `<h4 style="font-size:14px;color:var(--accent-amber);margin-bottom:8px">📋 待审核 (${requests.length})</h4>
+        ${requests.map(r => `<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(245,158,11,0.05);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-sm);margin-bottom:8px">
+          <div style="flex:1"><strong>${r.display_name||r.user_id}</strong> 申请以 ${r.role} 加入
+            ${r.message?`<div style="font-size:12px;color:var(--text-muted);margin-top:4px">留言: ${r.message}</div>`:''}</div>
+          <button class="btn btn-primary" style="padding:4px 12px;font-size:12px" onclick="reviewJoin(${r.id},'approved')">✓ 同意</button>
+          <button class="btn" style="padding:4px 12px;font-size:12px;color:var(--accent-rose)" onclick="reviewJoin(${r.id},'rejected')">✗ 拒绝</button>
+        </div>`).join('')}` : ''}
+    </div>`;
+  }
+  document.getElementById('team-content').innerHTML = html;
+}
+
+function showInviteModal(pid) {
+  showModal('邀请成员', `
+    <form onsubmit="doInvite(event,'${pid}')" style="display:flex;flex-direction:column;gap:12px">
+      <input name="user_id" placeholder="用户名" required class="btn" style="width:100%;text-align:left">
+      <select name="role" class="btn" style="width:100%">
+        <option value="member">Member</option>
+        <option value="viewer">Viewer</option>
+      </select>
+      <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center">邀请</button>
+    </form>
+  `);
+}
+
+async function doInvite(e, pid) {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const r = await fetch(`/api/projects/${pid}/invite`, {method:'POST', headers:authHeaders(),
+    body: JSON.stringify({user_id: f.get('user_id'), role: f.get('role')})});
+  const d = await r.json();
+  if (r.ok) { toast(d.message||'已邀请', 'success'); closeModal({target:{id:'modal-overlay'}}); loadTeam(); }
+  else toast(d.detail||'邀请失败', 'error');
+}
+
+async function reviewJoin(reqId, action) {
+  const note = action === 'rejected' ? prompt('拒绝理由（可选）:') || '' : '';
+  const r = await fetch(`/api/join-requests/${reqId}/review`, {method:'POST', headers:authHeaders(),
+    body: JSON.stringify({action, note})});
+  const d = await r.json();
+  if (r.ok) { toast(d.message||'已处理', 'success'); loadTeam(); }
+  else toast(d.detail||'操作失败', 'error');
+}
+
+// ── Notifications ──
+async function loadNotifications() {
+  const data = await api('/api/notifications');
+  if (!data) return;
+  const notes = data.notifications || [];
+  updateNotifBadge(data.unread_count);
+
+  if (!notes.length) { document.getElementById('notif-list').innerHTML =
+    '<div class="empty-state"><p>没有通知</p></div>'; return; }
+
+  document.getElementById('notif-list').innerHTML = notes.map(n => {
+    const isUnread = !n.is_read;
+    return `<div class="event-item" style="${isUnread?'border-left:3px solid var(--accent-blue);padding-left:12px':''}">
+      <div class="event-dot ${isUnread?'advanced':'default'}"></div>
+      <div class="event-header">
+        <span class="event-type" style="font-size:14px">${n.title}</span>
+        <span class="event-time">${fmtTime(n.created_at)}</span>
+      </div>
+      <div class="event-detail">${n.body}</div>
+      ${isUnread?`<button class="btn" style="padding:2px 8px;font-size:11px;margin-top:4px" onclick="markRead(${n.id})">标为已读</button>`:''}
+    </div>`;
+  }).join('');
+}
+
+async function markRead(nid) {
+  await fetch(`/api/notifications/${nid}/read`, {method:'POST', headers:authHeaders()});
+  loadNotifications();
+}
+
+async function markAllRead() {
+  await fetch('/api/notifications/read-all', {method:'POST', headers:authHeaders()});
+  toast('全部标为已读', 'success');
+  loadNotifications();
+}
+
+function updateNotifBadge(count) {
+  const badge = document.getElementById('nav-notif-count');
+  if (count > 0) { badge.textContent = count; badge.style.display = 'inline-flex'; }
+  else badge.style.display = 'none';
+}
+
 // ── Refresh ──
 async function refreshAll() {
   const active = document.querySelector('.nav-item.active')?.dataset.section || 'overview';
   const loaders = {overview:loadOverview, tickets:loadTickets, agents:loadAgents,
-    projects:loadProjects, events:loadEvents, deploy:loadDeploy};
+    projects:loadProjects, events:loadEvents, deploy:loadDeploy,
+    team:loadTeam, notifications:loadNotifications};
   if (loaders[active]) await loaders[active]();
   toast('Refreshed', 'success');
 }
 
-// Auto-refresh every 30s
-setInterval(() => {
+// Poll notification badge every 30s
+setInterval(async () => {
+  if (!_apiKey) return;
   const active = document.querySelector('.nav-item.active')?.dataset.section;
   if (active === 'overview') loadOverview();
+  // Always poll notifications badge
+  const data = await api('/api/notifications?unread_only=true');
+  if (data) updateNotifBadge(data.unread_count);
 }, 30000);
 
 // ── Init ──
 loadOverview();
+// Initial notification check
+setTimeout(async () => {
+  if (!_apiKey) return;
+  const data = await api('/api/notifications?unread_only=true');
+  if (data) updateNotifBadge(data.unread_count);
+}, 2000);
