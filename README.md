@@ -484,7 +484,7 @@ aegis register --id gemini-01 --provider gemini --name "Gemini Worker"
 # 2. View available roles
 aegis roles
 
-# 3. Claim tickets directly (no exam needed)
+# 3. Start claiming tickets
 aegis tickets
 aegis claim PR-42
 ```
@@ -719,7 +719,7 @@ python setup_skills.py  # Auto-copies skills to agent workspace
 ```
 
 The `aegis-worker.md` skill teaches an AI agent how to:
-1. Register and get certified
+1. Register and start working
 2. Claim tickets in the right order
 3. Submit evidence in the correct format
 4. Handle rejections and rework cycles

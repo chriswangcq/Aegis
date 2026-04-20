@@ -68,7 +68,7 @@ post_mortems ── 失败模式分析
 
 knowledge ──── 沉淀的知识
 
-trust_events ── 信任变动日志
+event_log ──── 完整审计链
 ```
 
 ## CI Runner 执行流程
