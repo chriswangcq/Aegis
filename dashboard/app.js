@@ -1,13 +1,64 @@
 /* Aegis Dashboard — app.js */
 const API = '';
 let _cache = {};
+let _apiKey = localStorage.getItem('aegis_api_key') || '';
+
+function authHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  if (_apiKey) h['Authorization'] = `Bearer ${_apiKey}`;
+  return h;
+}
 
 async function api(path) {
   try {
-    const r = await fetch(API + path);
+    const r = await fetch(API + path, {headers: authHeaders()});
+    if (r.status === 401) { showLogin('Session expired or invalid key'); return null; }
     if (!r.ok) throw new Error(r.statusText);
     return await r.json();
   } catch(e) { console.error(path, e); return null; }
+}
+
+function showLogin(msg) {
+  document.querySelector('.app').style.display = 'none';
+  let login = document.getElementById('login-screen');
+  if (!login) {
+    login = document.createElement('div');
+    login.id = 'login-screen';
+    login.innerHTML = `
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg-primary)">
+        <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:40px;width:400px;text-align:center">
+          <div style="width:56px;height:56px;background:var(--gradient-blue);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:white;margin:0 auto 16px;box-shadow:0 4px 16px rgba(59,130,246,0.3)">A</div>
+          <h1 style="font-size:24px;font-weight:700;margin-bottom:4px">Aegis</h1>
+          <p style="font-size:13px;color:var(--text-muted);margin-bottom:24px">Engineering Governance Platform</p>
+          <div id="login-error" style="color:var(--accent-rose);font-size:13px;margin-bottom:12px;display:none"></div>
+          <input id="login-key" type="password" placeholder="API Key" 
+            style="width:100%;padding:10px 14px;background:var(--bg-glass);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:14px;margin-bottom:12px;outline:none"
+            onkeydown="if(event.key==='Enter')doLogin()">
+          <button onclick="doLogin()" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px">Sign In</button>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:16px">Use your project API key or admin key</p>
+        </div>
+      </div>`;
+    document.body.appendChild(login);
+  }
+  login.style.display = 'block';
+  if (msg) { const e = document.getElementById('login-error'); e.textContent = msg; e.style.display = 'block'; }
+  document.getElementById('login-key').focus();
+}
+
+async function doLogin() {
+  const key = document.getElementById('login-key').value.trim();
+  if (!key) return;
+  try {
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key: key})});
+    if (!r.ok) { const d = await r.json(); document.getElementById('login-error').textContent = d.detail||'Invalid key'; document.getElementById('login-error').style.display='block'; return; }
+    const data = await r.json();
+    _apiKey = key;
+    localStorage.setItem('aegis_api_key', key);
+    document.getElementById('login-screen').style.display = 'none';
+    document.querySelector('.app').style.display = 'flex';
+    toast(`Logged in as ${data.role} (${data.project_id})`, 'success');
+    loadOverview();
+  } catch(e) { document.getElementById('login-error').textContent = 'Connection failed'; document.getElementById('login-error').style.display='block'; }
 }
 
 function toast(msg, type='info') {
@@ -204,7 +255,7 @@ async function createTicket(e) {
   const body = {id:f.get('id'),title:f.get('title'),description:f.get('description'),
     project_id:f.get('project_id'),priority:parseInt(f.get('priority')),
     risk_level:f.get('risk_level'),checklist:f.get('checklist')?f.get('checklist').split(',').map(s=>s.trim()).filter(Boolean):[]};
-  const r = await fetch('/tickets', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const r = await fetch('/tickets', {method:'POST',headers:authHeaders(),body:JSON.stringify(body)});
   if (r.ok) { toast('Ticket created', 'success'); closeModal({target:{id:'modal-overlay'}}); loadTickets(); }
   else { const d = await r.json(); toast(d.detail||'Failed', 'error'); }
 }
@@ -364,7 +415,7 @@ async function loadDeploy() {
 async function deployTo(pid, env) {
   if (!confirm(`Deploy ${pid} to ${env.toUpperCase()}?`)) return;
   toast(`Deploying to ${env}...`, 'info');
-  const r = await fetch(`/projects/${pid}/deploy/${env}`, {method:'POST'});
+  const r = await fetch(`/projects/${pid}/deploy/${env}`, {method:'POST',headers:authHeaders()});
   const d = await r.json();
   if (r.ok) toast(`Deployed to ${env}: ${d.status}`, d.status==='ok'?'success':'error');
   else toast(d.detail||'Deploy failed', 'error');

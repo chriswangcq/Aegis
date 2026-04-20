@@ -1,20 +1,87 @@
 """Aegis — AI-native engineering governance platform."""
-import json, logging
+import json, logging, os
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from .db import get_db, init_schema, seed_roles, now_ms, log_event, PHASE_ROLE, SUBMIT_NEXT, VALID_PHASES
 from .models import *
 from . import logic
 from . import provisioner
 from . import automation
+from . import auth as auth_module
 
 logger = logging.getLogger("command-center")
 _conn = None
 def db(): return _conn
+
+# Admin key from env — for bootstrapping (create first project, etc.)
+ADMIN_KEY = os.environ.get("AEGIS_ADMIN_KEY", "")
+# Set to "open" to disable auth (dev mode)
+AUTH_MODE = os.environ.get("AEGIS_AUTH", "enforced")
+
+# Routes that don't require auth
+PUBLIC_PATHS = frozenset({
+    "/", "/status", "/docs", "/openapi.json", "/redoc",
+    "/dashboard/style.css", "/dashboard/app.js", "/dashboard/index.html",
+    "/api/login",
+})
+
+def _is_public(path: str) -> bool:
+    if path in PUBLIC_PATHS:
+        return True
+    if path.startswith("/dashboard"):
+        return True
+    if path.startswith("/docs") or path.startswith("/redoc"):
+        return True
+    return False
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Skip auth in open mode
+        if AUTH_MODE == "open":
+            return await call_next(request)
+
+        # Skip auth for public routes
+        if _is_public(request.url.path):
+            return await call_next(request)
+
+        # Extract key from Authorization header or query param
+        auth_header = request.headers.get("authorization", "")
+        api_key = ""
+        if auth_header.startswith("Bearer "):
+            api_key = auth_header[7:]
+        elif request.query_params.get("api_key"):
+            api_key = request.query_params["api_key"]
+
+        if not api_key:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing API key. Use: Authorization: Bearer <key>"}
+            )
+
+        # Check admin key
+        if ADMIN_KEY and api_key == ADMIN_KEY:
+            request.state.auth = auth_module.AuthContext(
+                project_id="*", agent_id="admin", role="admin", key_id="admin"
+            )
+            return await call_next(request)
+
+        # Check DB api_keys
+        ctx = auth_module.validate_api_key(api_key, db())
+        if not ctx:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or revoked API key"}
+            )
+
+        request.state.auth = ctx
+        return await call_next(request)
+
 
 def row_to_dict(row): return dict(row) if row else None
 
@@ -44,12 +111,19 @@ async def lifespan(app):
     global _conn
     _conn = get_db(); init_schema(_conn); seed_roles(_conn)
     automation.start_canary_poller(db, interval_seconds=60)
+    if AUTH_MODE == "open":
+        logger.warning("⚠️  Auth disabled (AEGIS_AUTH=open). Set AEGIS_ADMIN_KEY for production.")
+    elif ADMIN_KEY:
+        logger.info(f"Auth enforced. Admin key configured.")
+    else:
+        logger.warning("⚠️  No AEGIS_ADMIN_KEY set. Only project API keys will work.")
     logger.info("Aegis v1.0 ready")
     yield
     automation.stop_canary_poller()
     _conn.close()
 
 app = FastAPI(title="Aegis", description="AI-native engineering governance platform", version="1.0.0", lifespan=lifespan)
+app.add_middleware(AuthMiddleware)
 
 _dashboard_dir = Path(__file__).parent.parent / "dashboard"
 if _dashboard_dir.exists():
@@ -58,6 +132,20 @@ if _dashboard_dir.exists():
 @app.get("/", include_in_schema=False)
 def root_redirect():
     return FileResponse(str(_dashboard_dir / "index.html"))
+
+@app.post("/api/login")
+def login(body: dict):
+    """Validate API key and return auth context. Used by dashboard."""
+    key = body.get("api_key", "")
+    if not key:
+        raise HTTPException(401, "API key required")
+    if ADMIN_KEY and key == ADMIN_KEY:
+        return {"role": "admin", "project_id": "*", "agent_id": "admin"}
+    ctx = auth_module.validate_api_key(key, db())
+    if not ctx:
+        raise HTTPException(401, "Invalid API key")
+    return {"role": ctx.role, "project_id": ctx.project_id, "agent_id": ctx.agent_id}
+
 
 @app.get("/status")
 def health():
