@@ -136,10 +136,13 @@ def cmd_register(args):
     if args.webhook:
         body["webhook_url"] = args.webhook
     data = _api("POST", "/agents", body)
-    cfg["agent_id"] = agent_id
-    _save_config(cfg)
+    # Only update local config if --id was explicitly provided
+    if args.id:
+        cfg["agent_id"] = agent_id
+        _save_config(cfg)
     print(f"✅ Registered as '{agent_id}'")
     print(f"   Next: {data.get('next_step', '')}")
+
 
 
 def cmd_whoami(args):
@@ -246,9 +249,11 @@ def cmd_submit(args):
                               "content": args.message or "", "verdict": args.verdict or "pass"}]
     data = _api("POST", f"/tickets/{args.ticket_id}/submit", body)
     print(f"✅ Submitted {args.ticket_id}")
-    print(f"   Phase: {data.get('phase', '?')}")
-    if data.get("ci_results"):
-        print(f"   CI: {len(data['ci_results'])} gate(s) checked")
+    print(f"   Phase: {data.get('new_phase', data.get('phase', '?'))}")
+    if data.get("gates_passed"):
+        print(f"   CI: {len(data['gates_passed'])} gate(s) passed")
+    if data.get("verification_mode"):
+        print(f"   Verification: {data['verification_mode']}")
 
 
 def cmd_advance(args):
@@ -258,7 +263,8 @@ def cmd_advance(args):
     if cfg.get("agent_id"):
         body["agent_id"] = cfg["agent_id"]
     data = _api("POST", f"/tickets/{args.ticket_id}/advance", body)
-    print(f"✅ Advanced {args.ticket_id} → {data.get('phase', '?')}")
+    phase = data.get("phase", data.get("new_phase", "?"))
+    print(f"✅ Advanced {args.ticket_id} → {phase}")
     if data.get("deploy"):
         d = data["deploy"]
         print(f"   Deploy: {d.get('status', '?')} ({d.get('env', '?')})")
@@ -272,11 +278,12 @@ def cmd_reject(args):
     body = {"reason": args.reason}
     if cfg.get("agent_id"):
         body["agent_id"] = cfg["agent_id"]
-    if args.blockers:
-        body["blocker_comments"] = args.blockers
+    body["blocker_comments"] = args.blockers or [args.reason]
     data = _api("POST", f"/tickets/{args.ticket_id}/reject", body)
     print(f"🔄 Rejected {args.ticket_id}")
     print(f"   Phase: {data.get('phase', '?')}")
+    if data.get("review_round"):
+        print(f"   Round: {data['review_round']}")
 
 
 def cmd_deploy(args):
@@ -332,6 +339,61 @@ def cmd_create_ticket(args):
     print(f"✅ Created {data.get('id', '?')}")
     print(f"   Phase: {data.get('phase', '?')}")
     print(f"   Project: {data.get('project_id', '(none)')}")
+
+
+def cmd_logs(args):
+    """View event log."""
+    cfg = _load_config()
+    params = []
+    if args.ticket:
+        params.append(f"ticket_id={args.ticket}")
+    if args.limit:
+        params.append(f"limit={args.limit}")
+    qs = f"?{'&'.join(params)}" if params else ""
+    data = _api("GET", f"/events{qs}")
+    events = data.get("events", [])
+    if not events:
+        print("📭 No events")
+        return
+    for e in events[-20:]:
+        ts = e.get("timestamp", "")
+        # Convert ms to readable if numeric
+        if isinstance(ts, (int, float)) and ts > 1e12:
+            from datetime import datetime
+            ts = datetime.fromtimestamp(ts / 1000).strftime("%m-%d %H:%M")
+        agent = e.get('agent_id', '') or ''
+        tid = e.get('ticket_id', '') or ''
+        action = e.get('event_type', e.get('action', '?'))
+        old = e.get('old_value', '') or ''
+        new = e.get('new_value', '') or ''
+        detail = f" ({old}→{new})" if old and new else (f" → {new}" if new else "")
+        agent_str = f" [{agent}]" if agent else ""
+        print(f"  {ts}  {action:20s} {tid:15s}{agent_str}{detail}")
+
+
+def cmd_roles(args):
+    """List available roles."""
+    data = _api("GET", "/roles")
+    roles = data.get("roles", [])
+    if not roles:
+        print("📭 No roles defined")
+        return
+    print("📋 Available roles:\n")
+    for r in roles:
+        print(f"  🎭 {r.get('id', '?'):15s} {r.get('display_name', '')}")
+        if r.get('description'):
+            print(f"     {r['description'][:60]}")
+
+
+def cmd_heartbeat(args):
+    """Send heartbeat (keeps ticket lock alive)."""
+    cfg = _load_config()
+    agent_id = cfg.get("agent_id")
+    if not agent_id:
+        print("❌ Run: aegis init --agent-id <id>", file=sys.stderr)
+        sys.exit(1)
+    _api("POST", f"/agents/{agent_id}/heartbeat")
+    print("💓 Heartbeat sent")
 
 
 def cmd_canary(args):
@@ -457,6 +519,17 @@ Examples:
     p.add_argument("--request-rate", type=float, help="Requests per second")
     p.add_argument("--saturation", type=float, help="Resource saturation (0-1)")
 
+    # logs
+    p = sub.add_parser("logs", help="View event log")
+    p.add_argument("--ticket", help="Filter by ticket ID")
+    p.add_argument("--limit", type=int, default=20, help="Max events")
+
+    # roles
+    sub.add_parser("roles", help="List available roles")
+
+    # heartbeat
+    sub.add_parser("heartbeat", help="Send heartbeat")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -468,6 +541,7 @@ Examples:
         "tickets": cmd_tickets, "create": cmd_create_ticket, "claim": cmd_claim,
         "submit": cmd_submit, "advance": cmd_advance, "reject": cmd_reject,
         "deploy": cmd_deploy, "project": cmd_project, "canary": cmd_canary,
+        "logs": cmd_logs, "roles": cmd_roles, "heartbeat": cmd_heartbeat,
     }
     commands[args.command](args)
 

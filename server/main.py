@@ -189,14 +189,24 @@ def heartbeat(agent_id: str):
 # ── TICKETS ──────────────────────────────────────────────────
 
 @app.get("/tickets")
-def list_tickets(phase: str = None, available: bool = False):
+def list_tickets(phase: str = None, project_id: str = None, available: bool = False):
+    conditions = []
+    params = []
+    if project_id:
+        conditions.append("project_id=?")
+        params.append(project_id)
     if available:
-        phases = "','".join(PHASE_ROLE.keys())
-        rows = db().execute(f"SELECT * FROM tickets WHERE phase IN ('{phases}') AND blocked_by IS NULL AND assigned_to IS NULL ORDER BY priority DESC, created_at ASC").fetchall()
+        claim_phases = list(PHASE_ROLE.keys())
+        placeholders = ",".join("?" * len(claim_phases))
+        conditions.append(f"phase IN ({placeholders})")
+        params.extend(claim_phases)
+        conditions.append("blocked_by IS NULL")
+        conditions.append("assigned_to IS NULL")
     elif phase:
-        rows = db().execute("SELECT * FROM tickets WHERE phase=? ORDER BY priority DESC, created_at ASC", (phase,)).fetchall()
-    else:
-        rows = db().execute("SELECT * FROM tickets ORDER BY priority DESC, created_at ASC").fetchall()
+        conditions.append("phase=?")
+        params.append(phase)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db().execute(f"SELECT * FROM tickets {where} ORDER BY priority DESC, created_at ASC", params).fetchall()
     return {"tickets": [_pj(row_to_dict(r)) for r in rows], "count": len(rows)}
 
 @app.get("/tickets/{tid}")
