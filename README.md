@@ -666,7 +666,7 @@ novaic-command-center/
 │   ├── main.py          # FastAPI routes + auth middleware
 │   ├── db.py            # Schema, migrations, helpers
 │   ├── models.py        # Pydantic request models
-│   ├── logic.py         # Business rules (trust, priority, gates)
+│   ├── logic.py         # Business rules (claim, review, gates, canary)
 │   ├── auth.py          # User auth, password hash, invite, join
 │   ├── automation.py    # Canary poller, rollback, notifications
 │   └── provisioner.py   # Project API key generation
