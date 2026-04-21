@@ -4,7 +4,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from server.logic import (
     can_claim, can_review, determine_next_phase,
-    grade_exam, calculate_trust_delta, analyze_rejection_trust,
     validate_submit_evidence,
 )
 from server.db import PHASE_ROLE
@@ -82,88 +81,6 @@ def test_different_provider_allowed():
 def test_no_prior_coder_is_ok():
     r = can_review("r1", "claude", None, None)
     assert r.ok
-
-# ── grade_exam ───────────────────────────────────────────────
-
-def test_all_choice_auto_pass():
-    qs = [{"type": "choice", "answer": "B"}, {"type": "choice", "answer": "A"}]
-    r = grade_exam(["B", "A"], qs, 0.7)
-    assert r.status == "passed"
-    assert r.score == 1.0
-
-def test_all_choice_auto_fail():
-    qs = [{"type": "choice", "answer": "B"}, {"type": "choice", "answer": "A"}]
-    r = grade_exam(["A", "B"], qs, 0.7)
-    assert r.status == "failed"
-    assert r.score == 0.0
-
-def test_mixed_pending_review():
-    qs = [{"type": "open", "q": "explain"}, {"type": "choice", "answer": "B"}]
-    r = grade_exam(["some answer", "B"], qs, 0.7)
-    assert r.status == "pending_review"
-    assert r.score is None
-
-def test_wrong_answer_count():
-    qs = [{"type": "choice", "answer": "B"}]
-    r = grade_exam(["A", "B"], qs)
-    assert r.status == "error"
-
-# ── calculate_trust_delta ────────────────────────────────────
-
-def test_trust_increment():
-    old = {"code_quality": 0.5}
-    new = calculate_trust_delta(old, "code_quality", +0.1, priority=5)  # full weight
-    assert abs(new["code_quality"] - 0.6) < 0.001
-
-def test_trust_clamps_to_one():
-    old = {"code_quality": 0.95}
-    new = calculate_trust_delta(old, "code_quality", +0.1, priority=5)
-    assert new["code_quality"] == 1.0
-
-def test_trust_clamps_to_zero():
-    old = {"code_quality": 0.02}
-    new = calculate_trust_delta(old, "code_quality", -0.1, priority=5)
-    assert new["code_quality"] == 0.0
-
-def test_trust_new_dimension():
-    old = {}
-    new = calculate_trust_delta(old, "test_quality", +0.1, priority=5)
-    assert abs(new["test_quality"] - 0.6) < 0.001  # default 0.5 + 0.1
-
-def test_trust_immutable():
-    old = {"x": 0.5}
-    new = calculate_trust_delta(old, "x", +0.1, priority=5)
-    assert old["x"] == 0.5  # original not mutated
-
-def test_trust_farming_prevention():
-    """Vuln 6: priority-1 trivial tickets should give minimal trust"""
-    from server.logic import weight_by_priority
-    trivial = weight_by_priority(0.02, priority=1)
-    critical = weight_by_priority(0.02, priority=5)
-    assert abs(trivial - 0.004) < 0.001   # 0.02 × 0.2
-    assert abs(critical - 0.02) < 0.001   # 0.02 × 1.0
-    assert critical / trivial == 5.0       # 5x difference
-
-# ── analyze_rejection_trust ──────────────────────────────────
-
-def test_basic_rejection_penalty():
-    penalties = analyze_rejection_trust("bad code", [])
-    assert len(penalties) == 1
-    assert penalties[0][0] == "code_quality"
-
-def test_fake_test_penalty():
-    penalties = analyze_rejection_trust("bad", ["这是假测试"])
-    dims = [p[0] for p in penalties]
-    assert "test_quality" in dims
-
-def test_scope_violation_penalty():
-    penalties = analyze_rejection_trust("bad", ["scope violation: touched scripts/"])
-    dims = [p[0] for p in penalties]
-    assert "commit_discipline" in dims
-
-def test_multiple_penalties():
-    penalties = analyze_rejection_trust("bad", ["fake test", "scope issue"])
-    assert len(penalties) == 3  # base + fake + scope
 
 # ── validate_submit_evidence ─────────────────────────────────
 

@@ -90,7 +90,7 @@ class TicketSubmit(BaseModel):
 class TicketAdvance(BaseModel):
     target_phase: str
     reason: str = ""
-    agent_id: str = ""  # must be master-certified to advance
+    agent_id: str = ""  # must be master to advance
 
 
 class TicketReject(BaseModel):
@@ -108,19 +108,13 @@ class AgentRegister(BaseModel):
     webhook_url: str = ""      # Aegis notifies agent here when tickets change
 
 
-# ── Certification / Exam ─────────────────────────────────────
 
-class ExamSubmit(BaseModel):
-    agent_id: str
-    answers: list[str]  # one answer per exam question
-
+# ── Roles ─────────────────────────────────────────────────────
 
 class RoleCreate(BaseModel):
     id: str
     display_name: str
     description: str = ""
-    exam_questions: list[dict] = Field(default_factory=list)
-    min_pass_score: float = 0.7
 
 
 # ── Comments ─────────────────────────────────────────────────

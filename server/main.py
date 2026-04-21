@@ -352,7 +352,7 @@ def health():
     return {"status": "ok", "version": "1.0.0", "projects": projects,
             "tickets": tickets, "agents": agents}
 
-# ── ROLES & CERTIFICATION ────────────────────────────────────
+# ── ROLES ────────────────────────────────────────────────────
 
 @app.get("/roles")
 def list_roles():
@@ -363,8 +363,6 @@ def get_role(role_id: str):
     r = db().execute("SELECT * FROM roles WHERE id=?", (role_id,)).fetchone()
     if not r: raise HTTPException(404)
     return _pj(row_to_dict(r))
-
-# Exam/certification endpoints removed — agents work directly without certification
 
 # ── AGENTS ───────────────────────────────────────────────────
 
@@ -742,7 +740,7 @@ def reject_ticket(tid: str, body: TicketReject):
 
 @app.post("/tickets/{tid}/advance")
 def advance_ticket(tid: str, body: TicketAdvance):
-    """Only master-certified agents can advance tickets."""
+    """Only master agents can advance tickets."""
     now = now_ms()
     t = db().execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
     if not t: raise HTTPException(404)
