@@ -73,8 +73,7 @@ def determine_next_phase(current_phase: str, ticket: dict) -> str:
 
 # ── Anti-Self-Review ─────────────────────────────────────────
 
-def can_review(agent_id: str, agent_provider: str,
-               coder_agent_id: str | None, coder_provider: str | None) -> Result:
+def can_review(agent_id: str, coder_agent_id: str | None) -> Result:
     """Can this agent review this ticket? Prevents self-review."""
     if coder_agent_id and coder_agent_id == agent_id:
         return Result(ok=False, error="Cannot review a ticket you worked on (anti-self-review)")

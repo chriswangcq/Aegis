@@ -581,14 +581,11 @@ def claim_ticket(tid: str, body: TicketClaim):
     # ── Logic: anti-self-review ──
     if required_role == "reviewer":
         coder_evs = db().execute(
-            "SELECT DISTINCT e.agent_id, a.provider FROM evidence e JOIN agents a ON a.id=e.agent_id "
-            "WHERE e.ticket_id=? AND e.phase IN ('implementation','rework','preflight_rework')",
+            "SELECT DISTINCT agent_id FROM evidence "
+            "WHERE ticket_id=? AND phase IN ('implementation','rework','preflight_rework')",
             (tid,)).fetchall()
-        my_provider = db().execute("SELECT provider FROM agents WHERE id=?", (body.agent_id,)).fetchone()
         for cev in (coder_evs or []):
-            review_check = logic.can_review(
-                body.agent_id, my_provider["provider"] if my_provider else "",
-                cev["agent_id"], cev["provider"])
+            review_check = logic.can_review(body.agent_id, cev["agent_id"])
             if not review_check.ok:
                 raise HTTPException(403, review_check.error)
 

@@ -65,21 +65,21 @@ def test_rework_stays_rework():
 # ── can_review ───────────────────────────────────────────────
 
 def test_self_review_blocked():
-    r = can_review("w1", "gemini", "w1", "gemini")
+    r = can_review("w1", "w1")
     assert not r.ok
     assert "anti-self-review" in r.error
 
 def test_same_provider_allowed():
     """Cross-provider check removed — same provider is now allowed."""
-    r = can_review("r1", "gemini", "w1", "gemini")
+    r = can_review("r1", "w1")
     assert r.ok
 
-def test_different_provider_allowed():
-    r = can_review("r1", "claude", "w1", "gemini")
+def test_different_agent_allowed():
+    r = can_review("r1", "w1")
     assert r.ok
 
 def test_no_prior_coder_is_ok():
-    r = can_review("r1", "claude", None, None)
+    r = can_review("r1", None)
     assert r.ok
 
 # ── validate_submit_evidence ─────────────────────────────────
